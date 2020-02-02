@@ -8,5 +8,6 @@ lazy val root = project
 
     scalaVersion := dottyVersion,
 
+    libraryDependencies += "com.google.protobuf" % "protobuf-java" % "3.11.0",
     libraryDependencies += "com.novocode" % "junit-interface" % "0.11" % "test"
   )
