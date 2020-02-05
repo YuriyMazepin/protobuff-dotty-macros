@@ -10,20 +10,23 @@ object api {
   }
     
   trait MessageCodec[A] {
-    def prepare(a: A): Prepare
+    // def prepare(a: A): Prepare
     def read(is: CodedInputStream): A
   }
   
   def encode[A: MessageCodec](a: A)(given c: MessageCodec[A]): Array[Byte] = {
-    val p = c.prepare(a)
-    val bytes = new Array[Byte](p.size)
-    val os = CodedOutputStream.newInstance(bytes)
-    p.write(os)
-    bytes
+    // val p = c.prepare(a)
+    // val bytes = new Array[Byte](p.size)
+    // val os = CodedOutputStream.newInstance(bytes)
+    // p.write(os)
+    // bytes
+    ???
   }
     
   def decode[A: MessageCodec](bytes: Array[Byte])(given c: MessageCodec[A]): A = {
     val is = CodedInputStream.newInstance(bytes)
     c.read(is)
   }
+
+  final case class N(n: Int) extends scala.annotation.StaticAnnotation
 }

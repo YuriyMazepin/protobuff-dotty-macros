@@ -11,16 +11,18 @@ object macrosapi {
 }
 
 object Impl {
-  def caseCodecAuto[A: Type](given QuoteContext): Expr[MessageCodec[A]] = '{
-    new MessageCodec[A] {
-      def prepare(a: A): Prepare = ???
-      def read(is: CodedInputStream): A = ${readImpl[A]}
-    }
+  def caseCodecAuto[A: Type](given qctx: QuoteContext): Expr[MessageCodec[A]] = {
+    import qctx.tasty.{_, given}
+    val t = '[A]
+    // println(t.unseal.tpe.classSymbol.map(_.caseFields.map(_.annots)))
+    '{ new MessageCodec[A] {
+        def read(is: CodedInputStream): A = ???//${ applyCaseClass[A]("Test") }
+       } 
+     }
   }
 
-  def readImpl[A: Type]: Expr[A] = {
-    val tpe: Type[A] = summon[Type[A]]
-    ???
-  }
-
+  // def applyCaseClass[A](name: String)(given qctx: QuoteContext): Expr[A] = {
+  //   import qctx.tasty.{_, given}
+  //   Apply(Select(Ident(name),"apply"),List())
+  // }
 }
