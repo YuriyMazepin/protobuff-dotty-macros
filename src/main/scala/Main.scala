@@ -7,13 +7,10 @@ import mazepin.proto.api.{MessageCodec, N, decode}
 object Main {
 
   def main(args: Array[String]): Unit = {
-    // implicit val codec1: MessageCodec[Animal] = casecodecAuto[Animal]
     // implicit val codec1: MessageCodec[Test] = casecodecAuto[Test]
-    // val codec2: MessageCodec[Dog.type] = casecodecAuto[Dog.type]
-
-    // val res: Animal = decode(Array())
-    val res = TestMacro.test[Test]
-    println(s"res => ${res.hello}")
+    implicit val codec1: MessageCodec[Dog.type] = casecodecAuto[Dog.type]
+    val res: Dog.type = decode(Array())
+    println(s"res ${res}")
   }
 
 }
