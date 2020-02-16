@@ -43,11 +43,17 @@ private class Impl(using qctx: QuoteContext) {
       , tpt = tpt
       )
     }
-    val codec = '{ new MessageCodec[A] {
-      def read(is: CodedInputStream): A = ${ readImpl(t, fields, 'is) }
+    val codec = 
+      '{ new MessageCodec[A] {
+          def prepare(a: A): Prepare[A] = new Prepare[A](a) {
+            var sizeAcc: Int = 0
+            val size: Int = 0
+            def write(os: CodedOutputStream): Unit = ()
+          }
+          def read(is: CodedInputStream): A = ${ readImpl(t, fields, 'is) }
       }
     }
-    // println(codec.show)
+    println(codec.show)
     codec
   }
 
@@ -99,6 +105,8 @@ private class Impl(using qctx: QuoteContext) {
     }
   }
 
+  // private def sizeImpl(params: List[FieldInfo], sizeAcc: Expr[Int]): Expr[Int] =
+
   private def classApply[A: Tpe](t: Tpe[A], params: List[Term]): Term =
     t.unseal.tpe match
       case y: TermRef => Ident(y)
@@ -110,22 +118,25 @@ private class Impl(using qctx: QuoteContext) {
   private val NTpe: Tpe[N] = '[N]
   private val NTypeSymbol = NTpe.unseal.tpe.typeSymbol
   private def (t: Type) isNType: Boolean = t.typeSymbol == NTypeSymbol
+  private def (t: Type) isCaseClass: Boolean = t.typeSymbol.flags.is(Flags.Case)
   private def caseClassParams[A: Tpe](t: Tpe[A]): List[Symbol] = t.unseal.tpe.typeSymbol.caseFields
 
-  private def StringType: Type = ('[String]).unseal.tpe
-  private def IntType: Type = ('[Int]).unseal.tpe
-  private def LongType: Type = ('[Long]).unseal.tpe
-  private def BooleanType: Type = ('[Boolean]).unseal.tpe
-  private def DoubleType: Type = ('[Double]).unseal.tpe
-  private def FloatType: Type = ('[Float]).unseal.tpe
-  private def OptionTpt: TypeTree = ('[Option]).unseal
+  private val StringType: Type = ('[String]).unseal.tpe
+  private val IntType: Type = ('[Int]).unseal.tpe
+  private val LongType: Type = ('[Long]).unseal.tpe
+  private val BooleanType: Type = ('[Boolean]).unseal.tpe
+  private val DoubleType: Type = ('[Double]).unseal.tpe
+  private val FloatType: Type = ('[Float]).unseal.tpe
+  private val OptionTpt: TypeTree = ('[Option]).unseal
 
-  private def (t: Type) isString: Boolean = t =:= StringType
-  private def (t: Type) isInt: Boolean = t =:= IntType
-  private def (t: Type) isLong: Boolean = t =:= LongType
-  private def (t: Type) isBoolean: Boolean = t =:= BooleanType
-  private def (t: Type) isDouble: Boolean = t =:= DoubleType
-  private def (t: Type) isFloat: Boolean = t =:= FloatType
+  private extension TypeOps on (t: Type) {
+    def isString: Boolean = t =:= StringType
+    def isInt: Boolean = t =:= IntType
+    def isLong: Boolean = t =:= LongType
+    def isBoolean: Boolean = t =:= BooleanType
+    def isDouble: Boolean = t =:= DoubleType
+    def isFloat: Boolean = t =:= FloatType
+  }
 
   private def readFun(t: Type, is: Expr[CodedInputStream]): Expr[Some[Any]] =
     if t.isInt then '{ Some(${is}.readInt32) }
