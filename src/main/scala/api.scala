@@ -14,7 +14,7 @@ object api {
     def read(is: CodedInputStream): A
   }
   
-  def encode[A: MessageCodec](a: A)(given c: MessageCodec[A]): Array[Byte] = {
+  def encode[A: MessageCodec](a: A)(using c: MessageCodec[A]): Array[Byte] = {
     // val p = c.prepare(a)
     // val bytes = new Array[Byte](p.size)
     // val os = CodedOutputStream.newInstance(bytes)
@@ -23,7 +23,7 @@ object api {
     ???
   }
     
-  def decode[A: MessageCodec](bytes: Array[Byte])(given c: MessageCodec[A]): A = {
+  def decode[A: MessageCodec](bytes: Array[Byte])(using c: MessageCodec[A]): A = {
     val is = CodedInputStream.newInstance(bytes)
     c.read(is)
   }
