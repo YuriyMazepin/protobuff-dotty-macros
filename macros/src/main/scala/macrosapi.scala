@@ -56,7 +56,7 @@ private class Impl(using qctx: QuoteContext) {
           def read(is: CodedInputStream): A = ${ readImpl(t, fields, 'is) }
       }
     }
-    println(codec.show)
+    // println(codec.show)
     codec
   }
 
