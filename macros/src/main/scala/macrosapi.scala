@@ -6,6 +6,8 @@ import com.google.protobuf.{CodedOutputStream, CodedInputStream}
 import scala.quoted._
 import scala.quoted.matching._
 import scala.internal.quoted.showName
+import scala.collection.immutable.ArraySeq
+import mazepin.proto.Bytes
 
 object macrosapi {
   inline def casecodecAuto[A]: MessageCodec[A] = ${Macro.caseCodecAuto[A]}
@@ -85,6 +87,8 @@ private class Impl(using qctx: QuoteContext) {
     else if t.isDouble then Some('{ ${os}.writeDoubleNoTag(${getValue.cast[Double]}) })
     else if t.isFloat then Some('{ ${os}.writeFloatNoTag(${getValue.cast[Float]}) })
     else if t.isString then Some('{ ${os}.writeStringNoTag(${getValue.cast[String]}) })
+    else if t.isString then Some('{ ${os}.writeStringNoTag(${getValue.cast[String]}) })
+    else if t.isArrayByte then Some('{ ${os}.writeByteArrayNoTag(${getValue.cast[Array[Byte]]}) })
     else None
   }
 
@@ -119,6 +123,7 @@ private class Impl(using qctx: QuoteContext) {
     else if t.isDouble then Some('{ 8 })
     else if t.isFloat then Some('{ 4 })
     else if t.isString then Some('{ CodedOutputStream.computeStringSizeNoTag(${getValue.cast[String]}) })
+    else if t.isArrayByte then Some('{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Array[Byte]]}) })
     else None
   }
 
@@ -178,6 +183,9 @@ private class Impl(using qctx: QuoteContext) {
         val applyMethod = sym.companionModule.method("apply").head
         Apply(Select(Ident(TermRef(x.qualifier, sym.name)), applyMethod), params)
 
+  private val ArrayByteType: Type = ('[Array[Byte]]).unseal.tpe
+  private val ArraySeqByteType: Type = ('[ArraySeq[Byte]]).unseal.tpe
+  private val BytesType: Type = ('[Bytes]).unseal.tpe
   private val NTpe: Type = ('[N]).unseal.tpe
   private def (t: Type) isNType: Boolean = t =:= NTpe
   private def (t: Type) isCaseClass: Boolean = t.typeSymbol.flags.is(Flags.Case)
@@ -190,6 +198,9 @@ private class Impl(using qctx: QuoteContext) {
     def isBoolean: Boolean = t =:= BooleanType
     def isDouble: Boolean = t =:= DoubleType
     def isFloat: Boolean = t =:= FloatType
+    def isArrayByte: Boolean = t =:= ArrayByteType
+    def isArraySeqByte: Boolean = t =:= ArraySeqByteType
+    def isBytesType: Boolean = t =:= BytesType
   }
 
   private def readFun(field: FieldInfo, is: Expr[CodedInputStream]): Expr[Some[Any]] =
@@ -200,6 +211,9 @@ private class Impl(using qctx: QuoteContext) {
     else if t.isDouble then '{ Some(${is}.readDouble) }
     else if t.isFloat then '{ Some(${is}.readFloat) }
     else if t.isString then '{ Some(${is}.readString) }
+    else if t.isArrayByte then '{ Some(${is}.readByteArray) }
+    else if t.isArraySeqByte then '{ Some(ArraySeq.unsafeWrapArray(${is}.readByteArray)) }
+    else if t.isBytesType then '{ Some(Bytes.unsafeWrap(${is}.readByteArray)) }
     else ???
 
   private def fieldTag(field: FieldInfo): Int = field.num << 3 | wireType(field.tpt.tpe)
@@ -208,7 +222,7 @@ private class Impl(using qctx: QuoteContext) {
     if t.isInt || t.isLong || t.isBoolean then 0
     else if t.isDouble then 1
     else if t.isFloat then 5
-    else if t.isString then 2
+    else if t.isString || t.isArrayByte || t.isArraySeqByte || t.isBytesType then 2
     else qctx.throwError(s"unsupported param type: ${t.typeSymbol.name}")
 
 }

@@ -2,6 +2,7 @@ package mazepin.proto.test
 
 import org.junit.Test
 import org.junit.Assert._
+import java.util.Arrays
 
 import mazepin.proto.macrosapi.casecodecAuto
 import mazepin.proto.api.{MessageCodec, N, decode, encode, Prepare}
@@ -15,6 +16,7 @@ object models {
   , @N(24) double: Double
   , @N(25) float: Float
   , @N(26) str: String
+  , @N(50) bytes: Array[Byte]
   )
 }
 
@@ -34,7 +36,8 @@ class Testing {
       double <- List(Double.MinValue, -2.0D, -1.0D, 0.0D, 1.0D, 2.0D, Double.MaxValue)
       float <- List(Float.MinValue, -2.0F, -1.0F, 0.0F, 1.0F, 2.0F, Float.MaxValue)
       str <- List("", "str")
-    } yield Basic(int = int, long = long, bool = bool, double = double, float = float, str = str)).foreach{ data =>
+      bytes <- List(Array.empty[Byte], Array(0.toByte), Array(1.toByte), Array(2.toByte), Array(255.toByte))
+    } yield Basic(int = int, long = long, bool = bool, double = double, float = float, str = str, bytes = bytes)).foreach{ data =>
       val decoded = decode(encode(data))
       assert(decoded.int == data.int)
       assert(decoded.long == data.long)
@@ -42,6 +45,7 @@ class Testing {
       assert(decoded.double == data.double)
       assert(decoded.float == data.float)
       assert(decoded.str == data.str)
+      assert(Arrays.equals(decoded.bytes, data.bytes))
     }
   }
 }
