@@ -1,10 +1,10 @@
 // val dottyVersion = "0.22.0-RC1"
-val dottyVersion = "0.23.0-bin-20200213-26de50a-NIGHTLY"
+val dottyVersion = "0.23.0-bin-20200217-e8fa408-NIGHTLY"
 
 lazy val root = project
   .in(file("."))
   .settings(
-    name := "dotty-simple",
+    name := "protobutff-dotty-macros",
     version := "0.1.0",
 
     scalaVersion := dottyVersion,
