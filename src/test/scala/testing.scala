@@ -7,6 +7,8 @@ import java.util.Arrays
 import mazepin.proto.macrosapi.casecodecAuto
 import mazepin.proto.api.{MessageCodec, N, decode, encode, Prepare}
 import com.google.protobuf.{CodedOutputStream, CodedInputStream}
+import scala.collection.immutable.ArraySeq
+import mazepin.proto.Bytes
 
 object models {
   case class Basic(
@@ -18,6 +20,10 @@ object models {
   , @N(26) str: String
   , @N(50) bytes: Array[Byte]
   )
+
+  final case class ClassWithArray(@N(1) x: Array[Byte])
+  final case class ClassWithArraySeq(@N(1) y: ArraySeq[Byte])
+  final case class ClassWithBytes(@N(1) z: Bytes)
 }
 
 class Testing {

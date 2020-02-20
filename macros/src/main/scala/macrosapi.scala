@@ -89,6 +89,8 @@ private class Impl(using qctx: QuoteContext) {
     else if t.isString then Some('{ ${os}.writeStringNoTag(${getValue.cast[String]}) })
     else if t.isString then Some('{ ${os}.writeStringNoTag(${getValue.cast[String]}) })
     else if t.isArrayByte then Some('{ ${os}.writeByteArrayNoTag(${getValue.cast[Array[Byte]]}) })
+    else if t.isArraySeqByte then Some('{ ${os}.writeByteArrayNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) })
+    else if t.isBytesType then Some('{ ${os}.writeByteArrayNoTag(${getValue.cast[Bytes]}.unsafeArray) })
     else None
   }
 
@@ -124,6 +126,8 @@ private class Impl(using qctx: QuoteContext) {
     else if t.isFloat then Some('{ 4 })
     else if t.isString then Some('{ CodedOutputStream.computeStringSizeNoTag(${getValue.cast[String]}) })
     else if t.isArrayByte then Some('{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Array[Byte]]}) })
+    else if t.isArraySeqByte then Some('{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) })
+    else if t.isBytesType then Some('{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Bytes]}.unsafeArray) })
     else None
   }
 
