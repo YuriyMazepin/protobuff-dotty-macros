@@ -11,7 +11,7 @@ import scala.collection.immutable.ArraySeq
 import mazepin.proto.Bytes
 
 object models {
-  case class Basic(
+  final case class Basic(
     @N(21) int: Int
   , @N(22) long: Long
   , @N(23) bool: Boolean
@@ -24,13 +24,18 @@ object models {
   final case class ClassWithArray(@N(1) x: Array[Byte])
   final case class ClassWithArraySeq(@N(1) y: ArraySeq[Byte])
   final case class ClassWithBytes(@N(1) z: Bytes)
+
+  given MessageCodec[Basic] = casecodecAuto
+  given MessageCodec[ClassWithArray] = casecodecAuto
+  given MessageCodec[ClassWithArraySeq] = casecodecAuto
+  given MessageCodec[ClassWithBytes] = casecodecAuto
 }
 
 class Testing {
   import models._
   
   @Test def encodeDecode(): Unit = {
-    implicit val codec: MessageCodec[Basic] = casecodecAuto[Basic]
+    // given MessageCodec[Basic] = casecodecAuto
     basic
   }
 
@@ -53,5 +58,26 @@ class Testing {
       assert(decoded.str == data.str)
       assert(Arrays.equals(decoded.bytes, data.bytes))
     }
+  }
+
+  //ArraySeq[Byte] is compatible with Array[Byte]
+  @Test def test1(): Unit = {
+    import java.util.Arrays
+    assert(Arrays.equals(decode[ClassWithArraySeq](encode[ClassWithArray](ClassWithArray(x=Array[Byte](1,2,3)))).y.unsafeArray.asInstanceOf[Array[Byte]], Array[Byte](1,2,3)))
+    assert(Arrays.equals(decode[ClassWithArray](encode[ClassWithArraySeq](ClassWithArraySeq(y=ArraySeq.unsafeWrapArray[Byte](Array[Byte](1,2,3))))).x, Array[Byte](1,2,3)))
+  }
+
+  //"Bytes is compatible with Array[Byte]"
+  @Test def test2(): Unit = {
+    import java.util.Arrays
+    assert(Arrays.equals(decode[ClassWithBytes](encode[ClassWithArray](ClassWithArray(x=Array[Byte](1,2,3)))).z.unsafeArray, Array[Byte](1,2,3)))
+    assert(Arrays.equals(decode[ClassWithArray](encode[ClassWithBytes](ClassWithBytes(z=Bytes.unsafeWrap(Array[Byte](1,2,3))))).x, Array[Byte](1,2,3)))
+  }
+
+  //array byte wrapper encode
+  @Test def test3(): Unit = {
+    val data = ClassWithArray(Array(6, 7, 8, 9, 0))
+    val encoded: Array[Byte] = encode(data)
+    assert(Arrays.equals(Array[Byte](10,5, 6,7,8,9,0), encoded))
   }
 }
