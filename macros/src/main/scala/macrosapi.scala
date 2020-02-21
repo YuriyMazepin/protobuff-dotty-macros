@@ -29,7 +29,7 @@ private class Impl(using qctx: QuoteContext) {
     val aType = t.unseal.tpe
     val aTypeSymbol = aType.typeSymbol
     val typeName = t.unseal.tpe.typeSymbol.name
-    val params: List[Symbol] = caseClassParams[A](t)
+    val params: List[Symbol] = aTypeSymbol.caseFields
     val nums: List[(String, Int)] = params.map(p => 
       p.annots.collect{ case Apply(Select(New(tpt),_), List(Literal(Constant(num: Int)))) if tpt.tpe.isNType => p.name -> num } match {
         case List(x) => x
@@ -55,7 +55,7 @@ private class Impl(using qctx: QuoteContext) {
             val size: Int = ${ sizeImpl('a, fields) }
             def write(os: CodedOutputStream): Unit = ${ writeImpl('a, fields, 'os) }
           }
-          def read(is: CodedInputStream): A = ${ readImpl(t, fields, 'is) }
+          def read(is: CodedInputStream): A = ${ readImpl(t.unseal.tpe, fields, 'is).cast[A] }
       }
     }
     // println(codec.show)
@@ -165,7 +165,7 @@ private class Impl(using qctx: QuoteContext) {
 
   private def OptionIsDefinedTerm(term: Term): Term = Select(term, OptionClass.method("isDefined").head)
 
-  private def readImpl[A: Tpe](t: Tpe[A], params: List[FieldInfo], is: Expr[CodedInputStream])(using ctx: Context): Expr[A] = {
+  private def readImpl(t: Type, params: List[FieldInfo], is: Expr[CodedInputStream])(using ctx: Context): Expr[Any] = {
 
     if (params.size > 0) {
       val xs: List[(Statement, Term, Term)] = params.map(p => {
@@ -187,11 +187,23 @@ private class Impl(using qctx: QuoteContext) {
           ${
             Expr.block(params.zip(xs).map{ case (p, (_,ref,_)) => {
               val paramTag = Expr(fieldTag(p))
-              val readFunExpr = readFun(p.tpe, is).get
-              val assign = Assign(ref, readFunExpr.unseal)
+              val readContent = readFun(p.tpe, is).map(fun =>
+                Assign(ref, fun.unseal).seal
+              ).get
+              // ).getOrElse{
+              //   if p.tpe.isIterable then ???
+              //   else {
+              //     val pType = p.tpe.seal.asInstanceOf[Tpe[Any]]
+              //     val codecType = messageCodecFor(p.tpe).seal.asInstanceOf[Tpe[MessageCodec[Any]]]
+              //     val codec = '{implicitly[${codecType}] }
+              //     val readMsg = '{ Some(${codec}.read(${is})) }
+              //     val assign = Assign(ref, readMsg.unseal)
+              //     putLimit(is, assign.seal)
+              //   }
+              // }
               '{  if (tag == ${paramTag}) { 
                     tagMatch = true
-                    ${assign.seal}
+                    ${readContent}
                   }
               }
             }}, Expr.unitExpr)
@@ -204,12 +216,20 @@ private class Impl(using qctx: QuoteContext) {
       val resTerms = xs.map(_._3)
       Block(
         statements
-      , classApply[A](t, resTerms)
-      ).seal.cast[A]
+      , classApply(t, resTerms)
+      ).seal
     } else {
-      classApply[A](t, Nil).seal.cast[A]
+      classApply(t, Nil).seal
     }
   }
+
+  def putLimit(is: Expr[CodedInputStream], read: Expr[Any]): Expr[Any] =
+    '{
+      val readSize: Int = ${is}.readRawVarint32
+      val limit = ${is}.pushLimit(readSize)
+      ${read}
+      ${is}.popLimit(limit)
+    }
 
   private def resTerm(ref: Ident, field: FieldInfo): Term =
     if (field.tpe.isOption) then ref
@@ -219,21 +239,25 @@ private class Impl(using qctx: QuoteContext) {
       '{ ${refExpr}.getOrElse(throw new RuntimeException(${Expr(error)})) }.unseal
     }
 
-  private def classApply[A: Tpe](t: Tpe[A], params: List[Term]): Term =
-    t.unseal.tpe match
+  private def classApply(t: Type, params: List[Term]): Term =
+    t match
       case y: TermRef => Ident(y)
       case x @ TypeRef(_) =>
         val sym = x.typeSymbol
         val applyMethod = sym.companionModule.method("apply").head
         Apply(Select(Ident(TermRef(x.qualifier, sym.name)), applyMethod), params)
 
-  private val ArrayByteType: Type = ('[Array[Byte]]).unseal.tpe
-  private val ArraySeqByteType: Type = ('[ArraySeq[Byte]]).unseal.tpe
-  private val BytesType: Type = ('[Bytes]).unseal.tpe
-  private val NTpe: Type = ('[N]).unseal.tpe
+  private val ArrayByteType: Type = typeOf[Array[Byte]]
+  private val ArraySeqByteType: Type = typeOf[ArraySeq[Byte]]
+  private val BytesType: Type = typeOf[Bytes]
+  private val NTpe: Type = typeOf[N]
+  private val ItetableType: Type = typeOf[scala.collection.Iterable[Unit]]
+  private val MessageCodecType: Type = typeOf[scala.collection.Iterable[Unit]]
   private def (t: Type) isNType: Boolean = t =:= NTpe
   private def (t: Type) isCaseClass: Boolean = t.typeSymbol.flags.is(Flags.Case)
-  private def caseClassParams[A: Tpe](t: Tpe[A]): List[Symbol] = t.unseal.tpe.typeSymbol.caseFields
+  private def (t: Type) isSealedTrait: Boolean = t.typeSymbol.flags.is(Flags.Sealed & Flags.Trait)
+  private def (t: Type) isIterable: Boolean = t <:< ItetableType && !t.isArraySeqByte
+  private def messageCodecFor(t: Type): Type = AppliedType(MessageCodecType, List(t))
   private def unitLiteral: Literal = Literal(Constant(()))
 
   private extension TypeOps on (t: Type) {
@@ -276,7 +300,13 @@ private class Impl(using qctx: QuoteContext) {
     else if t.isDouble then 1
     else if t.isFloat then 5
     else if t.isOption then wireType(t.optionArgument)
-    else if t.isString || t.isArrayByte || t.isArraySeqByte || t.isBytesType then 2
-    else qctx.throwError(s"unsupported param type: ${t.typeSymbol.name}")
+    else if t.isString || 
+            t.isArrayByte || 
+            t.isArraySeqByte || 
+            t.isBytesType || 
+            t.isCaseClass ||
+            t.isSealedTrait ||
+            t.isIterable then 2
+    else 2
 
 }
