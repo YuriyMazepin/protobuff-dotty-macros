@@ -104,7 +104,6 @@ private class Impl(using qctx: QuoteContext) {
     else if t.isDouble then Some('{ ${os}.writeDoubleNoTag(${getValue.cast[Double]}) })
     else if t.isFloat then Some('{ ${os}.writeFloatNoTag(${getValue.cast[Float]}) })
     else if t.isString then Some('{ ${os}.writeStringNoTag(${getValue.cast[String]}) })
-    else if t.isString then Some('{ ${os}.writeStringNoTag(${getValue.cast[String]}) })
     else if t.isArrayByte then Some('{ ${os}.writeByteArrayNoTag(${getValue.cast[Array[Byte]]}) })
     else if t.isArraySeqByte then Some('{ ${os}.writeByteArrayNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) })
     else if t.isBytesType then Some('{ ${os}.writeByteArrayNoTag(${getValue.cast[Bytes]}.unsafeArray) })
