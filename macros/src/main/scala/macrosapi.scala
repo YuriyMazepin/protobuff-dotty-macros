@@ -22,7 +22,7 @@ private class Impl(using qctx: QuoteContext) {
   import qctx.tasty.{_, given _}
   import qctx.tasty.defn._
 
-  private[this] case class FieldInfo(name: String, num: Int, tpt: TypeTree, getter: Symbol)
+  private[this] case class FieldInfo(name: String, num: Int, tpe: Type, getter: Symbol)
 
   def caseCodecAuto[A: Tpe]: Expr[MessageCodec[A]] = {
     val t = summon[Tpe[A]]
@@ -38,14 +38,14 @@ private class Impl(using qctx: QuoteContext) {
       }
     )
     val fields: List[FieldInfo] = params.map{ s =>
-      val (name, tpt) = s.tree match
-        case ValDef(vName,vTpt,vRhs) => (vName, vTpt)
+      val (name, tpe) = s.tree match
+        case ValDef(vName,vTpt,vRhs) => (vName, vTpt.tpe)
         case _ => qctx.throwError(s"wrong param definition of case class `${typeName}`")
 
       FieldInfo(
         name = name
       , num = nums.collectFirst{ case (n, num) if n == name => num }.getOrElse(qctx.throwError(s"missing num for `${name}: ${typeName}`"))
-      , tpt = tpt
+      , tpe = tpe
       , getter = aTypeSymbol.field(name)
       )
     }
@@ -66,21 +66,38 @@ private class Impl(using qctx: QuoteContext) {
     Expr.block(
       params.map(p =>
         writeBasic(a, os, p)
+          .orElse(writeOption(a, os, p))
       ).flatten.flatten
     , Expr.unitExpr)
   }
 
   private def writeBasic[A: Tpe](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): Option[List[Expr[Unit]]] =
-    writeFun(a, os, field).map(fun =>
+    writeFun(os, field.tpe, getterTerm(a, field)).map(fun =>
       List(
         '{ ${os}.writeUInt32NoTag(${Expr(fieldTag(field))}) }
       , fun
       )
     )
+  
+  private def writeOption[A: Tpe](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): Option[List[Expr[Unit]]] =
+    if field.tpe.isOption then
+      val tpe = field.tpe.optionArgument
+      val getter = getterTerm(a, field)
+      val getterOption = getterOptionTerm(a, field)
+      writeFun(os, tpe, getterOption).map(fun => {
+        val isDefined = Select(getter, OptionClass.method("isDefined").head).seal.cast[Boolean]
+        val expr = '{
+          if ${isDefined} then {
+            ${os}.writeUInt32NoTag(${Expr(fieldTag(field))})
+            ${fun}
+          }
+        }
+        List(expr)
+      })
+    else None
 
-  private def writeFun[A: Tpe](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): Option[Expr[Unit]] = {
-    val getValue = Select(a.unseal, field.getter).seal
-    val t = field.tpt.tpe
+  private def writeFun(os: Expr[CodedOutputStream], t: Type, getterTerm: Term): Option[Expr[Unit]] = {
+    val getValue = getterTerm.seal
     if t.isInt then Some('{ ${os}.writeInt32NoTag(${getValue.cast[Int]}) })
     else if t.isLong then Some('{ ${os}.writeInt64NoTag(${getValue.cast[Long]}) })
     else if t.isBoolean then Some('{ ${os}.writeBoolNoTag(${getValue.cast[Boolean]}) })
@@ -97,13 +114,10 @@ private class Impl(using qctx: QuoteContext) {
   private def sizeImpl[A: Tpe](a: Expr[A], params: List[FieldInfo])(using ctx: Context): Expr[Int] = {
     val sizeSym = Symbol.newVal(ctx.owner, "sizeAcc", IntType, Flags.Mutable, Symbol.noSymbol)
     val sizeRef = Ref(sizeSym)
-    val sizeExpr = sizeRef.seal.cast[Int]
     val init = ValDef(sizeSym, Some(Literal(Constant(0))))
     val xs = params.map(p => {
-      sizeBasic(a, p).map(exp => {
-        val sum: Expr[Int] = '{ ${sizeExpr} + ${exp} }
-        Assign(sizeRef, sum.unseal)
-      })
+      sizeBasic(a, p, sizeRef)
+        .orElse(sizeOption(a, p, sizeRef))
     }).flatten
     Block(
       init +: xs
@@ -111,14 +125,27 @@ private class Impl(using qctx: QuoteContext) {
     ).seal.cast[Int]
   }
 
-  private def sizeBasic[A: Tpe](a: Expr[A], field: FieldInfo): Option[Expr[Int]] =
-    sizeFun(a, field).map(fun => {
-      '{ CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
+  private def sizeBasic[A: Tpe](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Option[Statement] =
+    sizeFun(field.tpe, getterTerm(a, field)).map(fun => {
+      val sum = '{ ${sizeAcc.seal.cast[Int]} + CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
+      Assign(sizeAcc, sum.unseal)
     })
+  
+  private def sizeOption[A: Tpe](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Option[Statement] =
+    if field.tpe.isOption then
+      val tpe = field.tpe.optionArgument
+      val getter = getterTerm(a, field)
+      val getterOption = getterOptionTerm(a, field)
+      sizeFun(tpe, getterOption).map(fun => {
+        val sum = '{ ${sizeAcc.seal.cast[Int]} + CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
+        val assign = Assign(sizeAcc, sum.unseal)
+        val isDefined = Select(getter, OptionClass.method("isDefined").head)
+        If(isDefined, assign, unitLiteral)
+      })
+    else None
 
-  private def sizeFun[A: Tpe](a: Expr[A], field: FieldInfo): Option[Expr[Int]] = {
-    val getValue = Select(a.unseal, field.getter).seal
-    val t = field.tpt.tpe
+  private def sizeFun(t: Type, getterTerm: Term): Option[Expr[Int]] = {
+    val getValue = getterTerm.seal
     if t.isInt then Some('{ CodedOutputStream.computeInt32SizeNoTag(${getValue.cast[Int]}) })
     else if t.isLong then Some('{ CodedOutputStream.computeInt64SizeNoTag(${getValue.cast[Long]}) })
     else if t.isBoolean then Some('{ 1 })
@@ -131,20 +158,25 @@ private class Impl(using qctx: QuoteContext) {
     else None
   }
 
+  private def getterTerm[A: Tpe](a: Expr[A], field: FieldInfo): Term =
+    Select(a.unseal, field.getter)
+
+  private def getterOptionTerm[A: Tpe](a: Expr[A], field: FieldInfo): Term =
+    Select(Select(a.unseal, field.getter), OptionClass.method("get").head)
+
+  private def OptionIsDefinedTerm(term: Term): Term = Select(term, OptionClass.method("isDefined").head)
+
   private def readImpl[A: Tpe](t: Tpe[A], params: List[FieldInfo], is: Expr[CodedInputStream])(using ctx: Context): Expr[A] = {
 
     if (params.size > 0) {
       val xs: List[(Statement, Term, Term)] = params.map(p => {
-        val pType = p.tpt.tpe.seal.asInstanceOf[Tpe[Any]]
+        val pType = p.tpe.seal.asInstanceOf[Tpe[Any]]
         val _none = '{ None:Option[${pType}] }.unseal
         val sym = Symbol.newVal(ctx.owner, s"${p.name}Read", _none.tpe.widen, Flags.Mutable, Symbol.noSymbol) 
         val init = ValDef(sym, Some(_none))
         val ref = Ref(sym).asInstanceOf[Ident]
-        val refExpr: Expr[Option[Any]] = ref.seal.cast[Option[Any]]
-        val nameExpr = Expr(p.name)
-        val numExpr = Expr(p.num)
-        val resTerm = '{ ${refExpr}.getOrElse(throw new RuntimeException("missign required field")) }.unseal //todo show field in exeption
-        (init, ref, resTerm)
+        val res = resTerm(ref, p)
+        (init, ref, res)
       })
 
       val read = '{
@@ -156,7 +188,8 @@ private class Impl(using qctx: QuoteContext) {
           ${
             Expr.block(params.zip(xs).map{ case (p, (_,ref,_)) => {
               val paramTag = Expr(fieldTag(p))
-              val assign = Assign(ref, readFun(p, is).unseal)
+              val readFunExpr = readFun(p.tpe, is).get
+              val assign = Assign(ref, readFunExpr.unseal)
               '{  if (tag == ${paramTag}) { 
                     tagMatch = true
                     ${assign.seal}
@@ -179,6 +212,14 @@ private class Impl(using qctx: QuoteContext) {
     }
   }
 
+  private def resTerm(ref: Ident, field: FieldInfo): Term =
+    if (field.tpe.isOption) then ref
+    else {
+      val refExpr: Expr[Option[Any]] = ref.seal.cast[Option[Any]]
+      val error = s"missing required field `${field.name}: ${field.tpe.typeSymbol.name}`"
+      '{ ${refExpr}.getOrElse(throw new RuntimeException(${Expr(error)})) }.unseal
+    }
+
   private def classApply[A: Tpe](t: Tpe[A], params: List[Term]): Term =
     t.unseal.tpe match
       case y: TermRef => Ident(y)
@@ -194,6 +235,7 @@ private class Impl(using qctx: QuoteContext) {
   private def (t: Type) isNType: Boolean = t =:= NTpe
   private def (t: Type) isCaseClass: Boolean = t.typeSymbol.flags.is(Flags.Case)
   private def caseClassParams[A: Tpe](t: Tpe[A]): List[Symbol] = t.unseal.tpe.typeSymbol.caseFields
+  private def unitLiteral: Literal = Literal(Constant(()))
 
   private extension TypeOps on (t: Type) {
     def isString: Boolean = t =:= StringType
@@ -205,27 +247,36 @@ private class Impl(using qctx: QuoteContext) {
     def isArrayByte: Boolean = t =:= ArrayByteType
     def isArraySeqByte: Boolean = t =:= ArraySeqByteType
     def isBytesType: Boolean = t =:= BytesType
+    def isOption: Boolean = t match {
+      case AppliedType(t1, _) if t1.typeSymbol == OptionClass => true
+      case _ => false
+    }
+    def optionArgument: Type = t match {
+      case AppliedType(t1, args) if t1.typeSymbol == OptionClass => args.head.asInstanceOf[Type]
+      case _ => qctx.throwError(s"It isn't Option type: ${t.typeSymbol.name}")
+    }
   }
 
-  private def readFun(field: FieldInfo, is: Expr[CodedInputStream]): Expr[Some[Any]] =
-    val t: Type = field.tpt.tpe
-    if t.isInt then '{ Some(${is}.readInt32) }
-    else if t.isLong then '{ Some(${is}.readInt64) }
-    else if t.isBoolean then '{ Some(${is}.readBool) }
-    else if t.isDouble then '{ Some(${is}.readDouble) }
-    else if t.isFloat then '{ Some(${is}.readFloat) }
-    else if t.isString then '{ Some(${is}.readString) }
-    else if t.isArrayByte then '{ Some(${is}.readByteArray) }
-    else if t.isArraySeqByte then '{ Some(ArraySeq.unsafeWrapArray(${is}.readByteArray)) }
-    else if t.isBytesType then '{ Some(Bytes.unsafeWrap(${is}.readByteArray)) }
-    else ???
+  private def readFun(t: Type, is: Expr[CodedInputStream]): Option[Expr[Some[Any]]] =
+    if t.isInt then Some('{ Some(${is}.readInt32) })
+    else if t.isLong then Some('{ Some(${is}.readInt64) })
+    else if t.isBoolean then Some('{ Some(${is}.readBool) })
+    else if t.isDouble then Some('{ Some(${is}.readDouble) })
+    else if t.isFloat then Some('{ Some(${is}.readFloat) })
+    else if t.isString then Some('{ Some(${is}.readString) })
+    else if t.isArrayByte then Some('{ Some(${is}.readByteArray) })
+    else if t.isArraySeqByte then Some('{ Some(ArraySeq.unsafeWrapArray(${is}.readByteArray)) })
+    else if t.isBytesType then Some('{ Some(Bytes.unsafeWrap(${is}.readByteArray)) })
+    else if t.isOption then readFun(t.optionArgument, is)
+    else None
 
-  private def fieldTag(field: FieldInfo): Int = field.num << 3 | wireType(field.tpt.tpe)
+  private def fieldTag(field: FieldInfo): Int = field.num << 3 | wireType(field.tpe)
 
   private def wireType(t: Type): Int =
     if t.isInt || t.isLong || t.isBoolean then 0
     else if t.isDouble then 1
     else if t.isFloat then 5
+    else if t.isOption then wireType(t.optionArgument)
     else if t.isString || t.isArrayByte || t.isArraySeqByte || t.isBytesType then 2
     else qctx.throwError(s"unsupported param type: ${t.typeSymbol.name}")
 

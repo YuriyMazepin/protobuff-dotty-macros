@@ -21,11 +21,22 @@ object models {
   , @N(50) bytes: Array[Byte]
   )
 
+  final case class OptionBasic( 
+    @N(21) int: Option[Int]
+  , @N(22) long: Option[Long]
+  , @N(23) bool: Option[Boolean]
+  , @N(24) double: Option[Double]
+  , @N(25) float: Option[Float]
+  , @N(26) str: Option[String]
+  , @N(50) bytes: Option[Array[Byte]]
+  )
+
   final case class ClassWithArray(@N(1) x: Array[Byte])
   final case class ClassWithArraySeq(@N(1) y: ArraySeq[Byte])
   final case class ClassWithBytes(@N(1) z: Bytes)
 
   given MessageCodec[Basic] = casecodecAuto
+  given MessageCodec[OptionBasic] = casecodecAuto
   given MessageCodec[ClassWithArray] = casecodecAuto
   given MessageCodec[ClassWithArraySeq] = casecodecAuto
   given MessageCodec[ClassWithBytes] = casecodecAuto
@@ -79,5 +90,33 @@ class Testing {
     val data = ClassWithArray(Array(6, 7, 8, 9, 0))
     val encoded: Array[Byte] = encode(data)
     assert(Arrays.equals(Array[Byte](10,5, 6,7,8,9,0), encoded))
+  }
+
+  // "empty bytearray <-> all fields none"
+  @Test def test4(): Unit = {
+    import java.util.Arrays
+    val data = OptionBasic(int = None, long = None, bool = None, double = None, float = None, str = None, bytes = None)
+    assert(Arrays.equals(encode(data), Array.empty[Byte]))
+    val decoded = decode[OptionBasic](Array.empty[Byte])
+    assert(decoded == data)
+  }
+
+  // "bytearray <-> all fields"
+  @Test def test5(): Unit = {
+    import java.util.Arrays
+
+    val data = OptionBasic(int = Some(1), long = Some(2L), bool = Some(true), double = Some(3.0D), float = Some(4.0F), str = Some("5"), bytes = Some(Array(6, 7, 8, 9, 0)))
+
+    val bytes = Array[Byte](168.toByte,1,1, 176.toByte,1,2, 184.toByte,1,1, 193.toByte,1,0,0,0,0,0,0,8,64, 205.toByte,1,0,0,128.toByte,64, 210.toByte,1,1,53, 146.toByte,3,5,6,7,8,9,0)
+    assert(Arrays.equals(encode(data), bytes))
+
+    val decoded = decode[OptionBasic](bytes)
+    assert(decoded.int.get == data.int.get)
+    assert(decoded.long.get == data.long.get)
+    assert(decoded.bool.get == data.bool.get)
+    assert(decoded.double.get == data.double.get)
+    assert(decoded.float.get == data.float.get)
+    assert(decoded.str.get == data.str.get)
+    assert(Arrays.equals(decoded.bytes.get, data.bytes.get))
   }
 }
