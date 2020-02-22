@@ -22,7 +22,7 @@ private class Impl(using qctx: QuoteContext) {
   import qctx.tasty.{_, given _}
   import qctx.tasty.defn._
 
-  private[this] case class FieldInfo(name: String, num: Int, tpe: Type, getter: Symbol)
+  private[this] case class FieldInfo(name: String, num: Int, tpe: Type, tpt: TypeTree, getter: Symbol)
 
   def caseCodecAuto[A: Tpe]: Expr[MessageCodec[A]] = {
     val t = summon[Tpe[A]]
@@ -38,14 +38,15 @@ private class Impl(using qctx: QuoteContext) {
       }
     )
     val fields: List[FieldInfo] = params.map{ s =>
-      val (name, tpe) = s.tree match
-        case ValDef(vName,vTpt,vRhs) => (vName, vTpt.tpe)
+      val (name, tpt) = s.tree match
+        case ValDef(vName,vTpt,vRhs) => (vName, vTpt)
         case _ => qctx.throwError(s"wrong param definition of case class `${typeName}`")
 
       FieldInfo(
         name = name
       , num = nums.collectFirst{ case (n, num) if n == name => num }.getOrElse(qctx.throwError(s"missing num for `${name}: ${typeName}`"))
-      , tpe = tpe
+      , tpe = tpt.tpe
+      , tpt = tpt
       , getter = aTypeSymbol.field(name)
       )
     }
@@ -163,8 +164,6 @@ private class Impl(using qctx: QuoteContext) {
   private def getterOptionTerm[A: Tpe](a: Expr[A], field: FieldInfo): Term =
     Select(Select(a.unseal, field.getter), OptionClass.method("get").head)
 
-  private def OptionIsDefinedTerm(term: Term): Term = Select(term, OptionClass.method("isDefined").head)
-
   private def readImpl(t: Type, params: List[FieldInfo], is: Expr[CodedInputStream])(using ctx: Context): Expr[Any] = {
 
     if (params.size > 0) {
@@ -223,7 +222,7 @@ private class Impl(using qctx: QuoteContext) {
     }
   }
 
-  def putLimit(is: Expr[CodedInputStream], read: Expr[Any]): Expr[Any] =
+  private def putLimit(is: Expr[CodedInputStream], read: Expr[Any]): Expr[Any] =
     '{
       val readSize: Int = ${is}.readRawVarint32
       val limit = ${is}.pushLimit(readSize)
@@ -231,12 +230,20 @@ private class Impl(using qctx: QuoteContext) {
       ${is}.popLimit(limit)
     }
 
+  // private def initValDef(): Tuple[ValDef, Ident] =
+
   private def resTerm(ref: Ident, field: FieldInfo): Term =
     if (field.tpe.isOption) then ref
     else {
-      val refExpr: Expr[Option[Any]] = ref.seal.cast[Option[Any]]
       val error = s"missing required field `${field.name}: ${field.tpe.typeSymbol.name}`"
-      '{ ${refExpr}.getOrElse(throw new RuntimeException(${Expr(error)})) }.unseal
+      val exeption = '{ throw new RuntimeException(${Expr(error)}) }.unseal
+      Apply(
+        TypeApply(
+          Select(ref, OptionClass.method("getOrElse").head)
+        , List(field.tpt)
+        )
+      , List(exeption)
+      )
     }
 
   private def classApply(t: Type, params: List[Term]): Term =
