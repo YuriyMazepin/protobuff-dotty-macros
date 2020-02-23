@@ -18,14 +18,13 @@ object Macro {
 }
 
 private class Impl(using qctx: QuoteContext) {
-  import scala.quoted.{Type => Tpe}
   import qctx.tasty.{_, given _}
   import qctx.tasty.defn._
 
   private[this] case class FieldInfo(name: String, num: Int, tpe: Type, tpt: TypeTree, getter: Symbol)
 
-  def caseCodecAuto[A: Tpe]: Expr[MessageCodec[A]] = {
-    val t = summon[Tpe[A]]
+  def caseCodecAuto[A: quoted.Type]: Expr[MessageCodec[A]] = {
+    val t = summon[quoted.Type[A]]
     val aType = t.unseal.tpe
     val aTypeSymbol = aType.typeSymbol
     val typeName = t.unseal.tpe.typeSymbol.name
@@ -50,6 +49,9 @@ private class Impl(using qctx: QuoteContext) {
       , getter = aTypeSymbol.field(name)
       )
     }
+    if (nums.exists(_._2 < 1)) qctx.throwError(s"nums ${nums} should be > 0")
+    if (nums.size != fields.size) qctx.throwError(s"nums size ${nums} not equal to `${aType}` constructor params size ${fields.size}")
+    if (nums.groupBy(_._2).exists(_._2.size != 1)) qctx.throwError(s"nums ${nums} should be unique")
     val codec = 
       '{ new MessageCodec[A] {
           def prepare(a: A): Prepare[A] = new Prepare[A](a) {
@@ -63,7 +65,7 @@ private class Impl(using qctx: QuoteContext) {
     codec
   }
 
-  private def writeImpl[A: Tpe](a: Expr[A], params: List[FieldInfo], os: Expr[CodedOutputStream]): Expr[Unit] ={
+  private def writeImpl[A: quoted.Type](a: Expr[A], params: List[FieldInfo], os: Expr[CodedOutputStream]): Expr[Unit] ={
     Expr.block(
       params.map(p =>
         writeBasic(a, os, p)
@@ -72,7 +74,7 @@ private class Impl(using qctx: QuoteContext) {
     , Expr.unitExpr)
   }
 
-  private def writeBasic[A: Tpe](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): Option[List[Expr[Unit]]] =
+  private def writeBasic[A: quoted.Type](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): Option[List[Expr[Unit]]] =
     writeFun(os, field.tpe, getterTerm(a, field)).map(fun =>
       List(
         '{ ${os}.writeUInt32NoTag(${Expr(fieldTag(field))}) }
@@ -80,7 +82,7 @@ private class Impl(using qctx: QuoteContext) {
       )
     )
   
-  private def writeOption[A: Tpe](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): Option[List[Expr[Unit]]] =
+  private def writeOption[A: quoted.Type](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): Option[List[Expr[Unit]]] =
     if field.tpe.isOption then
       val tpe = field.tpe.optionArgument
       val getter = getterTerm(a, field)
@@ -111,7 +113,7 @@ private class Impl(using qctx: QuoteContext) {
     else None
   }
 
-  private def sizeImpl[A: Tpe](a: Expr[A], params: List[FieldInfo])(using ctx: Context): Expr[Int] = {
+  private def sizeImpl[A: quoted.Type](a: Expr[A], params: List[FieldInfo])(using ctx: Context): Expr[Int] = {
     val sizeSym = Symbol.newVal(ctx.owner, "sizeAcc", IntType, Flags.Mutable, Symbol.noSymbol)
     val sizeRef = Ref(sizeSym)
     val init = ValDef(sizeSym, Some(Literal(Constant(0))))
@@ -125,13 +127,13 @@ private class Impl(using qctx: QuoteContext) {
     ).seal.cast[Int]
   }
 
-  private def sizeBasic[A: Tpe](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Option[Statement] =
+  private def sizeBasic[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Option[Statement] =
     sizeFun(field.tpe, getterTerm(a, field)).map(fun => {
       val sum = '{ ${sizeAcc.seal.cast[Int]} + CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
       Assign(sizeAcc, sum.unseal)
     })
   
-  private def sizeOption[A: Tpe](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Option[Statement] =
+  private def sizeOption[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Option[Statement] =
     if field.tpe.isOption then
       val tpe = field.tpe.optionArgument
       val getter = getterTerm(a, field)
@@ -158,21 +160,17 @@ private class Impl(using qctx: QuoteContext) {
     else None
   }
 
-  private def getterTerm[A: Tpe](a: Expr[A], field: FieldInfo): Term =
+  private def getterTerm[A: quoted.Type](a: Expr[A], field: FieldInfo): Term =
     Select(a.unseal, field.getter)
 
-  private def getterOptionTerm[A: Tpe](a: Expr[A], field: FieldInfo): Term =
+  private def getterOptionTerm[A: quoted.Type](a: Expr[A], field: FieldInfo): Term =
     Select(Select(a.unseal, field.getter), OptionClass.method("get").head)
 
   private def readImpl(t: Type, params: List[FieldInfo], is: Expr[CodedInputStream])(using ctx: Context): Expr[Any] = {
 
     if (params.size > 0) {
       val xs: List[(Statement, Term, Term)] = params.map(p => {
-        val pType = p.tpe.seal.asInstanceOf[Tpe[Any]]
-        val _none = '{ None:Option[${pType}] }.unseal
-        val sym = Symbol.newVal(ctx.owner, s"${p.name}Read", _none.tpe.widen, Flags.Mutable, Symbol.noSymbol) 
-        val init = ValDef(sym, Some(_none))
-        val ref = Ref(sym).asInstanceOf[Ident]
+        val (init, ref) = initValDef(p)
         val res = resTerm(ref, p)
         (init, ref, res)
       })
@@ -187,8 +185,22 @@ private class Impl(using qctx: QuoteContext) {
             Expr.block(params.zip(xs).map{ case (p, (_,ref,_)) => {
               val paramTag = Expr(fieldTag(p))
               val readContent = readFun(p.tpe, is).map(fun =>
-                Assign(ref, fun.unseal).seal
-              ).get
+                Assign(ref, '{Some(${fun})}.unseal).seal
+              ).getOrElse{
+                if p.tpe.isIterable then {
+                  val tpe1 = p.tpe.iterableArgument
+                  readFun(tpe1, is).map(fun => {
+                    val addOneMethod = Select(ref, ref.tpe.termSymbol.method("addOne").head)
+                    val addOneApply = Apply(addOneMethod, List(fun.unseal)).seal
+                    if tpe1.isString || tpe1.isArrayByte || tpe1.isArraySeqByte || tpe1.isBytesType then {
+                      addOneApply
+                    } else {
+                      val readMessage = '{ while (${is}.getBytesUntilLimit > 0) ${addOneApply} }
+                      putLimit(is, readMessage)
+                    }
+                  }).getOrElse{ ??? }
+                } else ???
+              }
               // ).getOrElse{
               //   if p.tpe.isIterable then ???
               //   else {
@@ -222,7 +234,7 @@ private class Impl(using qctx: QuoteContext) {
     }
   }
 
-  private def putLimit(is: Expr[CodedInputStream], read: Expr[Any]): Expr[Any] =
+  private def putLimit(is: Expr[CodedInputStream], read: Expr[Unit]): Expr[Unit] =
     '{
       val readSize: Int = ${is}.readRawVarint32
       val limit = ${is}.pushLimit(readSize)
@@ -230,10 +242,39 @@ private class Impl(using qctx: QuoteContext) {
       ${is}.popLimit(limit)
     }
 
-  // private def initValDef(): Tuple[ValDef, Ident] =
+  private def initValDef(field: FieldInfo)(using ctx: Context): (ValDef, Ident) =
+    if field.tpe.isOption then {
+      // val pType = field.tpe.seal.asInstanceOf[quoted.Type[Any]]
+      // val _none = '{ None:${pType} }.unseal
+      val _none = Typed(Ref(NoneModule), field.tpt)
+      val sym = Symbol.newVal(ctx.owner, s"${field.name}Read", field.tpe, Flags.Mutable, Symbol.noSymbol)
+      val init = ValDef(sym, Some(_none))
+      val ref = Ref(sym).asInstanceOf[Ident]
+      init -> ref
+    } else if field.tpe.isIterable then {
+      val tpe1 = field.tpe.iterableArgument
+      val collectionType = field.tpe.iterableBaseType
+      val collectionCompanion = collectionType.typeSymbol.companionModule
+      val newBuilderMethod = collectionCompanion.method("newBuilder").head
+      val builderType = appliedBuilderType(tpe1, field.tpe)
+      val sym = Symbol.newVal(ctx.owner, s"${field.name}Read", builderType, Flags.EmptyFlags, Symbol.noSymbol)
+      val rhs = Select(Ref(collectionCompanion), newBuilderMethod)
+      val init = ValDef(sym, Some(rhs))
+      val ref = Ref(sym).asInstanceOf[Ident]
+      init -> ref
+    } else {
+      val pType = field.tpe.seal.asInstanceOf[quoted.Type[Any]]
+      val _none = '{ None:Option[${pType}] }.unseal
+      val sym = Symbol.newVal(ctx.owner, s"${field.name}Read", _none.tpe, Flags.Mutable, Symbol.noSymbol)
+      val init = ValDef(sym, Some(_none))
+      val ref = Ref(sym).asInstanceOf[Ident]
+      init -> ref
+    }
 
   private def resTerm(ref: Ident, field: FieldInfo): Term =
-    if (field.tpe.isOption) then ref
+    if field.tpe.isOption then ref
+    else if field.tpe.isIterable then
+      Select(ref, ref.tpe.termSymbol.method("result").head)
     else {
       val error = s"missing required field `${field.name}: ${field.tpe.typeSymbol.name}`"
       val exeption = '{ throw new RuntimeException(${Expr(error)}) }.unseal
@@ -252,20 +293,27 @@ private class Impl(using qctx: QuoteContext) {
       case x @ TypeRef(_) =>
         val sym = x.typeSymbol
         val applyMethod = sym.companionModule.method("apply").head
-        Apply(Select(Ident(TermRef(x.qualifier, sym.name)), applyMethod), params)
+        Apply(Select(Ref(sym.companionModule), applyMethod), params)
 
   private val ArrayByteType: Type = typeOf[Array[Byte]]
   private val ArraySeqByteType: Type = typeOf[ArraySeq[Byte]]
   private val BytesType: Type = typeOf[Bytes]
   private val NTpe: Type = typeOf[N]
-  private val ItetableType: Type = typeOf[scala.collection.Iterable[Unit]]
-  private val MessageCodecType: Type = typeOf[scala.collection.Iterable[Unit]]
+  private val ItetableType: Type = typeOf[scala.collection.Iterable[Any]]
+  // private val MessageCodecType: Type = typeOf[MessageCodec[Any]]
+  private val CodedInputStreamType: Type = typeOf[CodedInputStream]
   private def (t: Type) isNType: Boolean = t =:= NTpe
   private def (t: Type) isCaseClass: Boolean = t.typeSymbol.flags.is(Flags.Case)
   private def (t: Type) isSealedTrait: Boolean = t.typeSymbol.flags.is(Flags.Sealed & Flags.Trait)
   private def (t: Type) isIterable: Boolean = t <:< ItetableType && !t.isArraySeqByte
-  private def messageCodecFor(t: Type): Type = AppliedType(MessageCodecType, List(t))
+  // private def messageCodecFor(t: Type): Type = AppliedType(MessageCodecType, List(t))
   private def unitLiteral: Literal = Literal(Constant(()))
+
+  private def builderType: Type = typeOf[scala.collection.mutable.Builder[Unit, Unit]]
+  private def appliedBuilderType(t1: Type, t2: Type): Type = builderType match {
+    case AppliedType(tycon,_) => AppliedType(tycon, List(t1, t2))
+    case _ => ???
+  }
 
   private extension TypeOps on (t: Type) {
     def isString: Boolean = t =:= StringType
@@ -285,18 +333,26 @@ private class Impl(using qctx: QuoteContext) {
       case AppliedType(t1, args) if t1.typeSymbol == OptionClass => args.head.asInstanceOf[Type]
       case _ => qctx.throwError(s"It isn't Option type: ${t.typeSymbol.name}")
     }
+    def iterableArgument: Type = t match {
+      case AppliedType(_, args) if t.isIterable => args.head.asInstanceOf[Type]
+      case _ => qctx.throwError(s"It isn't Iterable type: ${t.typeSymbol.name}")
+    }
+    def iterableBaseType: Type = t match {
+      case AppliedType(t1, _) if t.isIterable => t1
+      case _ => qctx.throwError(s"It isn't Iterable type: ${t.typeSymbol.name}")
+    }
   }
 
-  private def readFun(t: Type, is: Expr[CodedInputStream]): Option[Expr[Some[Any]]] =
-    if t.isInt then Some('{ Some(${is}.readInt32) })
-    else if t.isLong then Some('{ Some(${is}.readInt64) })
-    else if t.isBoolean then Some('{ Some(${is}.readBool) })
-    else if t.isDouble then Some('{ Some(${is}.readDouble) })
-    else if t.isFloat then Some('{ Some(${is}.readFloat) })
-    else if t.isString then Some('{ Some(${is}.readString) })
-    else if t.isArrayByte then Some('{ Some(${is}.readByteArray) })
-    else if t.isArraySeqByte then Some('{ Some(ArraySeq.unsafeWrapArray(${is}.readByteArray)) })
-    else if t.isBytesType then Some('{ Some(Bytes.unsafeWrap(${is}.readByteArray)) })
+  private def readFun(t: Type, is: Expr[CodedInputStream]): Option[Expr[Any]] =
+    if t.isInt then Some('{ ${is}.readInt32 })
+    else if t.isLong then Some('{ ${is}.readInt64 })
+    else if t.isBoolean then Some('{ ${is}.readBool })
+    else if t.isDouble then Some('{ ${is}.readDouble })
+    else if t.isFloat then Some('{ ${is}.readFloat })
+    else if t.isString then Some('{ ${is}.readString })
+    else if t.isArrayByte then Some('{ ${is}.readByteArray })
+    else if t.isArraySeqByte then Some('{ ArraySeq.unsafeWrapArray(${is}.readByteArray) })
+    else if t.isBytesType then Some('{ Bytes.unsafeWrap(${is}.readByteArray) })
     else if t.isOption then readFun(t.optionArgument, is)
     else None
 
