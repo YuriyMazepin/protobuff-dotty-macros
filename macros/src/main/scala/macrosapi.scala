@@ -120,6 +120,7 @@ private class Impl(using qctx: QuoteContext) {
     val xs = params.map(p => {
       sizeBasic(a, p, sizeRef)
         .orElse(sizeOption(a, p, sizeRef))
+        .orElse(sizeCollection(a, p, sizeRef))
     }).flatten
     Block(
       init +: xs
@@ -145,6 +146,25 @@ private class Impl(using qctx: QuoteContext) {
         If(isDefined, assign, unitLiteral)
       })
     else None
+
+  private def sizeCollection[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref)(using ctx: Context): Option[Statement] = 
+    if field.tpe.isIterable then {
+      val tpe1 = field.tpe.iterableArgument
+      // val collectionType = field.tpe.iterableBaseType
+      val getter = getterTerm(a, field).seal.cast[Iterable[Any]]
+      val pType = tpe1.seal.asInstanceOf[quoted.Type[Any]]
+      val test = '{ ${getter}.foreach((v: ${pType}) => ${sizeFun(tpe1, 'v.unseal).get}) }
+      // val test = '{ 
+      //   for {
+      //     y: ${pType} <- ${getter}
+      //   } yield {
+      //     val s: Int = ${sizeFun(tpe1, 'y.unseal).get}
+      //     ()
+      //   }
+      // }
+      println(test.show)
+      None
+    } else None
 
   private def sizeFun(t: Type, getterTerm: Term): Option[Expr[Int]] = {
     val getValue = getterTerm.seal
