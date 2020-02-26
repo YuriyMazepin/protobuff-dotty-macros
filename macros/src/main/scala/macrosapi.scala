@@ -117,67 +117,86 @@ private class Impl(using qctx: QuoteContext) {
     val sizeSym = Symbol.newVal(ctx.owner, "sizeAcc", IntType, Flags.Mutable, Symbol.noSymbol)
     val sizeRef = Ref(sizeSym)
     val init = ValDef(sizeSym, Some(Literal(Constant(0))))
-    val xs = params.map(p => {
-      sizeBasic(a, p, sizeRef)
-        .orElse(sizeOption(a, p, sizeRef))
-        .orElse(sizeCollection(a, p, sizeRef))
-    }).flatten
+    val xs = params.map(p => size(a, p, sizeRef))
     Block(
       init +: xs
     , sizeRef
     ).seal.cast[Int]
   }
 
-  private def sizeBasic[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Option[Statement] =
-    sizeFun(field.tpe, getterTerm(a, field)).map(fun => {
-      val sum = '{ ${sizeAcc.seal.cast[Int]} + CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
-      Assign(sizeAcc, sum.unseal)
-    })
+  private def size[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Statement =
+   if field.tpe.isCommonType then sizeCommon(a, field, sizeAcc)
+   else if field.tpe.isOption then sizeOption(a, field, sizeAcc)
+   else if field.tpe.isIterable then sizeCollection(a, field, sizeAcc)
+   else ???
+
+  private def sizeCommon[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Statement =
+    val fun = sizeFun(field.tpe, getterTerm(a, field))
+    val sum = '{ ${sizeAcc.seal.cast[Int]} + CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
+    Assign(sizeAcc, sum.unseal)
   
-  private def sizeOption[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Option[Statement] =
-    if field.tpe.isOption then
-      val tpe = field.tpe.optionArgument
-      val getter = getterTerm(a, field)
-      val getterOption = getterOptionTerm(a, field)
-      sizeFun(tpe, getterOption).map(fun => {
-        val sum = '{ ${sizeAcc.seal.cast[Int]} + CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
-        val assign = Assign(sizeAcc, sum.unseal)
-        val isDefined = Select(getter, OptionClass.method("isDefined").head)
-        If(isDefined, assign, unitLiteral)
-      })
-    else None
+  private def sizeOption[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Statement =
+    val tpe = field.tpe.optionArgument
+    val getter = getterTerm(a, field)
+    val getterOption = getterOptionTerm(a, field)
+    if (tpe.isCommonType) then {
+      val fun = sizeFun(tpe, getterOption)
+      val sum = '{ ${sizeAcc.seal.cast[Int]} + CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
+      val assign = Assign(sizeAcc, sum.unseal)
+      val isDefined = Select(getter, OptionClass.method("isDefined").head)
+      If(isDefined, assign, unitLiteral)
+    } else ???
 
-  private def sizeCollection[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref)(using ctx: Context): Option[Statement] = 
-    if field.tpe.isIterable then {
-      val tpe1 = field.tpe.iterableArgument
-      // val collectionType = field.tpe.iterableBaseType
-      val getter = getterTerm(a, field).seal.cast[Iterable[Any]]
-      val pType = tpe1.seal.asInstanceOf[quoted.Type[Any]]
-      val test = '{ ${getter}.foreach((v: ${pType}) => ${sizeFun(tpe1, 'v.unseal).get}) }
-      // val test = '{ 
-      //   for {
-      //     y: ${pType} <- ${getter}
-      //   } yield {
-      //     val s: Int = ${sizeFun(tpe1, 'y.unseal).get}
-      //     ()
-      //   }
-      // }
-      println(test.show)
-      None
-    } else None
+  private def sizeCollection[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Statement = 
+    val tpe1 = field.tpe.iterableArgument
+    val getter = getterTerm(a, field).seal.cast[Iterable[Any]]
+    val pType = tpe1.seal.asInstanceOf[quoted.Type[Any]]
+    val fieldSizeName = s"${field.name}Size"
+    if tpe1.isString || 
+       tpe1.isArrayByte || 
+       tpe1.isArraySeqByte || 
+       tpe1.isBytesType then {
+      val tagSizeName = s"${field.name}TagSize"
+      '{ 
+        @showName(${Expr(tagSizeName)})
+        val tagSize = CodedOutputStream.computeTagSize(${Expr(field.num)})
+        @showName(${Expr(fieldSizeName)})
+        var fieldSize: Int = 0
+        ${getter}.foreach((v: ${pType}) => fieldSize = fieldSize + ${sizeFun(tpe1, 'v.unseal)} + tagSize) 
+        ${
+          val sum = '{${sizeAcc.seal.cast[Int]} + fieldSize}
+          Assign(sizeAcc, sum.unseal).seal
+        }
+      }.unseal
+    } else {
+      '{
+        @showName(${Expr(fieldSizeName)})
+        var fieldSize: Int = 0
+        ${getter}.foreach((v: ${pType}) => fieldSize = fieldSize + ${sizeFun(tpe1, 'v.unseal)})
+        ${
+          val sum = '{ 
+            ${sizeAcc.seal.cast[Int]} +
+              CodedOutputStream.computeTagSize(${Expr(field.num)}) +
+              CodedOutputStream.computeUInt32SizeNoTag(fieldSize) +
+              fieldSize
+          }
+          Assign(sizeAcc, sum.unseal).seal
+        } 
+      }.unseal
+    }
 
-  private def sizeFun(t: Type, getterTerm: Term): Option[Expr[Int]] = {
+  private def sizeFun(t: Type, getterTerm: Term): Expr[Int] = {
     val getValue = getterTerm.seal
-    if t.isInt then Some('{ CodedOutputStream.computeInt32SizeNoTag(${getValue.cast[Int]}) })
-    else if t.isLong then Some('{ CodedOutputStream.computeInt64SizeNoTag(${getValue.cast[Long]}) })
-    else if t.isBoolean then Some('{ 1 })
-    else if t.isDouble then Some('{ 8 })
-    else if t.isFloat then Some('{ 4 })
-    else if t.isString then Some('{ CodedOutputStream.computeStringSizeNoTag(${getValue.cast[String]}) })
-    else if t.isArrayByte then Some('{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Array[Byte]]}) })
-    else if t.isArraySeqByte then Some('{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) })
-    else if t.isBytesType then Some('{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Bytes]}.unsafeArray) })
-    else None
+    if t.isInt then '{ CodedOutputStream.computeInt32SizeNoTag(${getValue.cast[Int]}) }
+    else if t.isLong then '{ CodedOutputStream.computeInt64SizeNoTag(${getValue.cast[Long]}) }
+    else if t.isBoolean then Expr(1)
+    else if t.isDouble then Expr(8)
+    else if t.isFloat then Expr(4)
+    else if t.isString then '{ CodedOutputStream.computeStringSizeNoTag(${getValue.cast[String]}) }
+    else if t.isArrayByte then '{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Array[Byte]]}) }
+    else if t.isArraySeqByte then '{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) }
+    else if t.isBytesType then '{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Bytes]}.unsafeArray) }
+    else qctx.throwError(s"Unsupported common type: ${t.typeSymbol.name}")
   }
 
   private def getterTerm[A: quoted.Type](a: Expr[A], field: FieldInfo): Term =
@@ -204,25 +223,34 @@ private class Impl(using qctx: QuoteContext) {
           ${
             Expr.block(params.zip(xs).map{ case (p, (_,ref,_)) => {
               val paramTag = Expr(fieldTag(p))
-              val readContent = readFun(p.tpe, is).map(fun =>
-                Assign(ref, '{Some(${fun})}.unseal).seal
-              ).getOrElse{
-                if p.tpe.isIterable then {
+              val readContent = 
+                if (p.tpe.isCommonType) then {
+                  val fun = readFun(p.tpe, is)
+                  Assign(ref, '{Some(${fun})}.unseal).seal
+                } else if p.tpe.isOption && p.tpe.optionArgument.isCommonType then {
+                  val fun = readFun(p.tpe.optionArgument, is)
+                  Assign(ref, '{Some(${fun})}.unseal).seal
+                } else if p.tpe.isOption then {
+                  ???
+                } else if p.tpe.isIterable && p.tpe.iterableArgument.isCommonType then {
                   val tpe1 = p.tpe.iterableArgument
-                  readFun(tpe1, is).map(fun => {
-                    val addOneMethod = Select(ref, ref.tpe.termSymbol.method("addOne").head)
-                    val addOneApply = Apply(addOneMethod, List(fun.unseal)).seal
-                    if tpe1.isString || tpe1.isArrayByte || tpe1.isArraySeqByte || tpe1.isBytesType then {
-                      addOneApply
-                    } else {
-                      val readMessage = '{ while (${is}.getBytesUntilLimit > 0) ${addOneApply} }
-                      putLimit(is, readMessage)
-                    }
-                  }).getOrElse{ ??? }
+                  val fun = readFun(tpe1, is)
+                  val addOneApply = Apply(
+                    Select(ref, ref.tpe.termSymbol.method("addOne").head)
+                  , List(fun.unseal)
+                  ).seal
+                  if tpe1.isString || 
+                     tpe1.isArrayByte || 
+                     tpe1.isArraySeqByte || 
+                     tpe1.isBytesType then addOneApply
+                  else {
+                    val readMessage = '{ while (${is}.getBytesUntilLimit > 0) ${addOneApply} }
+                    putLimit(is, readMessage)
+                  }
+                } else if p.tpe.isIterable then {
+                  ???
                 } else ???
-              }
-              // ).getOrElse{
-              //   if p.tpe.isIterable then ???
+
               //   else {
               //     val pType = p.tpe.seal.asInstanceOf[Tpe[Any]]
               //     val codecType = messageCodecFor(p.tpe).seal.asInstanceOf[Tpe[MessageCodec[Any]]]
@@ -335,6 +363,9 @@ private class Impl(using qctx: QuoteContext) {
     case _ => ???
   }
 
+  private val commonTypes: List[Type] =
+    StringType :: IntType :: LongType :: BooleanType :: DoubleType :: FloatType :: ArrayByteType :: ArraySeqByteType :: BytesType :: Nil 
+
   private extension TypeOps on (t: Type) {
     def isString: Boolean = t =:= StringType
     def isInt: Boolean = t =:= IntType
@@ -361,20 +392,20 @@ private class Impl(using qctx: QuoteContext) {
       case AppliedType(t1, _) if t.isIterable => t1
       case _ => qctx.throwError(s"It isn't Iterable type: ${t.typeSymbol.name}")
     }
+    def isCommonType: Boolean = commonTypes.exists(_ =:= t)
   }
 
-  private def readFun(t: Type, is: Expr[CodedInputStream]): Option[Expr[Any]] =
-    if t.isInt then Some('{ ${is}.readInt32 })
-    else if t.isLong then Some('{ ${is}.readInt64 })
-    else if t.isBoolean then Some('{ ${is}.readBool })
-    else if t.isDouble then Some('{ ${is}.readDouble })
-    else if t.isFloat then Some('{ ${is}.readFloat })
-    else if t.isString then Some('{ ${is}.readString })
-    else if t.isArrayByte then Some('{ ${is}.readByteArray })
-    else if t.isArraySeqByte then Some('{ ArraySeq.unsafeWrapArray(${is}.readByteArray) })
-    else if t.isBytesType then Some('{ Bytes.unsafeWrap(${is}.readByteArray) })
-    else if t.isOption then readFun(t.optionArgument, is)
-    else None
+  private def readFun(t: Type, is: Expr[CodedInputStream]): Expr[Any] =
+    if t.isInt then '{ ${is}.readInt32 }
+    else if t.isLong then '{ ${is}.readInt64 }
+    else if t.isBoolean then '{ ${is}.readBool }
+    else if t.isDouble then '{ ${is}.readDouble }
+    else if t.isFloat then '{ ${is}.readFloat }
+    else if t.isString then '{ ${is}.readString }
+    else if t.isArrayByte then '{ ${is}.readByteArray }
+    else if t.isArraySeqByte then '{ ArraySeq.unsafeWrapArray(${is}.readByteArray) }
+    else if t.isBytesType then '{ Bytes.unsafeWrap(${is}.readByteArray) }
+    else qctx.throwError(s"Unsupported common type: ${t.typeSymbol.name}")
 
   private def fieldTag(field: FieldInfo): Int = field.num << 3 | wireType(field.tpe)
 
