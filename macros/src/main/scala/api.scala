@@ -4,13 +4,13 @@ package proto
 import com.google.protobuf.{CodedOutputStream, CodedInputStream}
 
 object api {
-  trait Prepare[A](a: A) {
+  trait Prepare {
     val size: Int
     def write(os: CodedOutputStream): Unit
   }
     
   trait MessageCodec[A] {
-    def prepare(a: A): Prepare[A]
+    def prepare(a: A): Prepare
     def read(is: CodedInputStream): A
   }
   

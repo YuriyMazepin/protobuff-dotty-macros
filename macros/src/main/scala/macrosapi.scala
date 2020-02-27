@@ -21,9 +21,10 @@ private class Impl(using qctx: QuoteContext) {
   import qctx.tasty.{_, given _}
   import qctx.tasty.defn._
 
-  private[this] case class FieldInfo(name: String, num: Int, tpe: Type, tpt: TypeTree, getter: Symbol)
+  private[this] case class FieldInfo(name: String, num: Int, tpe: Type, tpt: TypeTree, getter: Symbol, sizeSym: Symbol)
 
   def caseCodecAuto[A: quoted.Type]: Expr[MessageCodec[A]] = {
+    val ctx = summon[Context]
     val t = summon[quoted.Type[A]]
     val aType = t.unseal.tpe
     val aTypeSymbol = aType.typeSymbol
@@ -47,23 +48,39 @@ private class Impl(using qctx: QuoteContext) {
       , tpe = tpt.tpe
       , tpt = tpt
       , getter = aTypeSymbol.field(name)
+      , sizeSym = Symbol.newVal(ctx.owner, s"${name}Size", IntType, Flags.Mutable, Symbol.noSymbol)
       )
     }
     if (nums.exists(_._2 < 1)) qctx.throwError(s"nums ${nums} should be > 0")
     if (nums.size != fields.size) qctx.throwError(s"nums size ${nums} not equal to `${aType}` constructor params size ${fields.size}")
     if (nums.groupBy(_._2).exists(_._2.size != 1)) qctx.throwError(s"nums ${nums} should be unique")
+
+
     val codec = 
       '{ new MessageCodec[A] {
-          def prepare(a: A): Prepare[A] = new Prepare[A](a) {
-            val size: Int = ${ sizeImpl('a, fields) }
-            def write(os: CodedOutputStream): Unit = ${ writeImpl('a, fields, 'os) }
-          }
+          def prepare(a: A): Prepare = ${ prepareImpl('a, fields) }
           def read(is: CodedInputStream): A = ${ readImpl(t.unseal.tpe, fields, 'is).cast[A] }
       }
     }
-    // println(codec.show)
+    println(codec.show)
     codec
   }
+
+  private def prepareImpl[A: quoted.Type](a: Expr[A], params: List[FieldInfo])(using ctx: Context): Expr[Prepare] =
+    val sizeAccSym = Symbol.newVal(ctx.owner, "sizeAcc", IntType, Flags.Mutable, Symbol.noSymbol)
+    val sizeAccRef = Ref(sizeAccSym)
+    val sizeAccValDef = ValDef(sizeAccSym, Some(Literal(Constant(0))))
+    val xs = params.map(p => size(a, p, sizeAccRef)).flatten
+    val newPrepare = '{
+      new Prepare {
+        val size: Int = ${ sizeAccRef.seal.cast[Int] }
+        def write(os: CodedOutputStream): Unit = ${ writeImpl(a, params, 'os) }
+      }
+    }.unseal
+    Block(
+      sizeAccValDef :: xs
+    , newPrepare
+    ).seal.cast[Prepare]
 
   private def writeImpl[A: quoted.Type](a: Expr[A], params: List[FieldInfo], os: Expr[CodedOutputStream]): Expr[Unit] ={
     Expr.block(
@@ -113,76 +130,59 @@ private class Impl(using qctx: QuoteContext) {
     else None
   }
 
-  private def sizeImpl[A: quoted.Type](a: Expr[A], params: List[FieldInfo])(using ctx: Context): Expr[Int] = {
-    val sizeSym = Symbol.newVal(ctx.owner, "sizeAcc", IntType, Flags.Mutable, Symbol.noSymbol)
-    val sizeRef = Ref(sizeSym)
-    val init = ValDef(sizeSym, Some(Literal(Constant(0))))
-    val xs = params.map(p => size(a, p, sizeRef))
-    Block(
-      init +: xs
-    , sizeRef
-    ).seal.cast[Int]
-  }
-
-  private def size[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Statement =
+  private def size[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] =
    if field.tpe.isCommonType then sizeCommon(a, field, sizeAcc)
    else if field.tpe.isOption then sizeOption(a, field, sizeAcc)
    else if field.tpe.isIterable then sizeCollection(a, field, sizeAcc)
    else ???
 
-  private def sizeCommon[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Statement =
+  private def sizeCommon[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] =
     val fun = sizeFun(field.tpe, getterTerm(a, field))
-    val sum = '{ ${sizeAcc.seal.cast[Int]} + CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
-    Assign(sizeAcc, sum.unseal)
+    val sum = '{ CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
+    List(increment(sizeAcc, sum))
   
-  private def sizeOption[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Statement =
+  private def sizeOption[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] =
     val tpe = field.tpe.optionArgument
     val getter = getterTerm(a, field)
     val getterOption = getterOptionTerm(a, field)
     if (tpe.isCommonType) then {
       val fun = sizeFun(tpe, getterOption)
-      val sum = '{ ${sizeAcc.seal.cast[Int]} + CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
-      val assign = Assign(sizeAcc, sum.unseal)
+      val sum = '{ CodedOutputStream.computeTagSize(${Expr(field.num)}) + ${fun} }
+      val incrementSize = increment(sizeAcc, sum)
       val isDefined = Select(getter, OptionClass.method("isDefined").head)
-      If(isDefined, assign, unitLiteral)
+      List(If(isDefined, incrementSize, unitLiteral))
     } else ???
 
-  private def sizeCollection[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): Statement = 
+  private def sizeCollection[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] = 
     val tpe1 = field.tpe.iterableArgument
     val getter = getterTerm(a, field).seal.cast[Iterable[Any]]
     val pType = tpe1.seal.asInstanceOf[quoted.Type[Any]]
-    val fieldSizeName = s"${field.name}Size"
+    val sizeRef = Ref(field.sizeSym)
+    val sizeValDef = ValDef(field.sizeSym, Some(Literal(Constant(0))))
     if tpe1.isString || 
        tpe1.isArrayByte || 
        tpe1.isArraySeqByte || 
        tpe1.isBytesType then {
       val tagSizeName = s"${field.name}TagSize"
-      '{ 
+      val sizeExpr = '{ 
         @showName(${Expr(tagSizeName)})
         val tagSize = CodedOutputStream.computeTagSize(${Expr(field.num)})
-        @showName(${Expr(fieldSizeName)})
-        var fieldSize: Int = 0
-        ${getter}.foreach((v: ${pType}) => fieldSize = fieldSize + ${sizeFun(tpe1, 'v.unseal)} + tagSize) 
-        ${
-          val sum = '{${sizeAcc.seal.cast[Int]} + fieldSize}
-          Assign(sizeAcc, sum.unseal).seal
-        }
-      }.unseal
+        ${getter}.foreach((v: ${pType}) => ${ increment(sizeRef, '{ ${sizeFun(tpe1, 'v.unseal)} + tagSize }).seal }  )
+      }
+      val incrementAcc = increment(sizeAcc, sizeRef.seal.cast[Int])
+      List(sizeValDef, sizeExpr.unseal, incrementAcc)
     } else {
-      '{
-        @showName(${Expr(fieldSizeName)})
-        var fieldSize: Int = 0
-        ${getter}.foreach((v: ${pType}) => fieldSize = fieldSize + ${sizeFun(tpe1, 'v.unseal)})
-        ${
-          val sum = '{ 
-            ${sizeAcc.seal.cast[Int]} +
-              CodedOutputStream.computeTagSize(${Expr(field.num)}) +
-              CodedOutputStream.computeUInt32SizeNoTag(fieldSize) +
-              fieldSize
-          }
-          Assign(sizeAcc, sum.unseal).seal
-        } 
-      }.unseal
+      val sizeExpr = '{
+        ${getter}.foreach((v: ${pType}) => ${ increment(sizeRef, sizeFun(tpe1, 'v.unseal)).seal } )
+      }
+      val sizeRefExpr = sizeRef.seal.cast[Int]
+      val sum = '{ 
+        CodedOutputStream.computeTagSize(${Expr(field.num)}) + 
+        CodedOutputStream.computeUInt32SizeNoTag(${sizeRefExpr}) +
+        ${sizeRefExpr}
+      }
+      val incrementAcc = increment(sizeAcc, sum)
+      List(sizeValDef, sizeExpr.unseal, incrementAcc)
     }
 
   private def sizeFun(t: Type, getterTerm: Term): Expr[Int] = {
@@ -250,16 +250,6 @@ private class Impl(using qctx: QuoteContext) {
                 } else if p.tpe.isIterable then {
                   ???
                 } else ???
-
-              //   else {
-              //     val pType = p.tpe.seal.asInstanceOf[Tpe[Any]]
-              //     val codecType = messageCodecFor(p.tpe).seal.asInstanceOf[Tpe[MessageCodec[Any]]]
-              //     val codec = '{implicitly[${codecType}] }
-              //     val readMsg = '{ Some(${codec}.read(${is})) }
-              //     val assign = Assign(ref, readMsg.unseal)
-              //     putLimit(is, assign.seal)
-              //   }
-              // }
               '{  if (tag == ${paramTag}) { 
                     tagMatch = true
                     ${readContent}
@@ -365,6 +355,9 @@ private class Impl(using qctx: QuoteContext) {
 
   private val commonTypes: List[Type] =
     StringType :: IntType :: LongType :: BooleanType :: DoubleType :: FloatType :: ArrayByteType :: ArraySeqByteType :: BytesType :: Nil 
+
+  private def increment(x: Ref, y: Expr[Int]): Assign =
+    Assign(x, '{ ${x.seal.cast[Int]} + ${y} }.unseal)
 
   private extension TypeOps on (t: Type) {
     def isString: Boolean = t =:= StringType
