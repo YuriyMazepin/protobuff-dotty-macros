@@ -70,7 +70,7 @@ private class Impl(using qctx: QuoteContext) {
     val sizeAccSym = Symbol.newVal(ctx.owner, "sizeAcc", IntType, Flags.Mutable, Symbol.noSymbol)
     val sizeAccRef = Ref(sizeAccSym)
     val sizeAccValDef = ValDef(sizeAccSym, Some(Literal(Constant(0))))
-    val xs = params.map(p => size(a, p, sizeAccRef)).flatten
+    val xs = params.flatMap(p => size(a, p, sizeAccRef))
     val newPrepare = '{
       new Prepare {
         val size: Int = ${ sizeAccRef.seal.cast[Int] }
@@ -84,50 +84,73 @@ private class Impl(using qctx: QuoteContext) {
 
   private def writeImpl[A: quoted.Type](a: Expr[A], params: List[FieldInfo], os: Expr[CodedOutputStream]): Expr[Unit] ={
     Expr.block(
-      params.map(p =>
-        writeBasic(a, os, p)
-          .orElse(writeOption(a, os, p))
-      ).flatten.flatten
+      params.flatMap(p =>
+        if p.tpe.isCommonType then writeCommon(a, os, p)
+        else if p.tpe.isOption then writeOption(a, os, p)
+        else if p.tpe.isIterable then writeCollection(a, os, p)
+        else ???
+      )
     , Expr.unitExpr)
   }
 
-  private def writeBasic[A: quoted.Type](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): Option[List[Expr[Unit]]] =
-    writeFun(os, field.tpe, getterTerm(a, field)).map(fun =>
-      List(
-        '{ ${os}.writeUInt32NoTag(${Expr(fieldTag(field))}) }
-      , fun
-      )
+  private def writeCommon[A: quoted.Type](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): List[Expr[Unit]] =
+    List(
+      '{ ${os}.writeUInt32NoTag(${Expr(fieldTag(field))}) }
+    , writeFun(os, field.tpe, getterTerm(a, field))
     )
   
-  private def writeOption[A: quoted.Type](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): Option[List[Expr[Unit]]] =
-    if field.tpe.isOption then
-      val tpe = field.tpe.optionArgument
-      val getter = getterTerm(a, field)
-      val getterOption = getterOptionTerm(a, field)
-      writeFun(os, tpe, getterOption).map(fun => {
-        val isDefined = Select(getter, OptionClass.method("isDefined").head).seal.cast[Boolean]
-        val expr = '{
-          if ${isDefined} then {
-            ${os}.writeUInt32NoTag(${Expr(fieldTag(field))})
-            ${fun}
-          }
+  private def writeOption[A: quoted.Type](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): List[Expr[Unit]] =
+    val tpe = field.tpe.optionArgument
+    val getter = getterTerm(a, field)
+    val getterOption = getterOptionTerm(a, field)
+    if tpe.isCommonType then {
+      val fun = writeFun(os, tpe, getterOption)
+      val isDefined = Select(getter, OptionClass.method("isDefined").head).seal.cast[Boolean]
+      val expr = '{
+        if ${isDefined} then {
+          ${os}.writeUInt32NoTag(${Expr(fieldTag(field))})
+          ${fun}
         }
-        List(expr)
-      })
-    else None
+      }
+      List(expr)
+    } else ???
 
-  private def writeFun(os: Expr[CodedOutputStream], t: Type, getterTerm: Term): Option[Expr[Unit]] = {
+  private def writeCollection[A: quoted.Type](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): List[Expr[Unit]] =
+    val tpe1 = field.tpe.iterableArgument
+    val getter = getterTerm(a, field).seal.cast[Iterable[Any]]
+    val pType = tpe1.seal.asInstanceOf[quoted.Type[Any]]
+    val sizeRef = Ref(field.sizeSym)
+    if tpe1.isString || 
+       tpe1.isArrayByte || 
+       tpe1.isArraySeqByte || 
+       tpe1.isBytesType then {
+      val expr = '{
+        ${getter}.foreach((v: ${pType}) => {
+          ${os}.writeUInt32NoTag(${Expr(fieldTag(field))})
+          ${writeFun(os, tpe1, 'v.unseal)}
+        })
+      }
+      List(expr)
+    } else {
+      List(
+        '{ ${os}.writeUInt32NoTag(${Expr(fieldTag(field))}) }
+      , '{ ${os}.writeUInt32NoTag(${sizeRef.seal.cast[Int]}) }
+      , '{ ${getter}.foreach((v: ${pType}) => ${writeFun(os, tpe1, 'v.unseal)} ) }
+      )
+    }
+
+  private def writeFun(os: Expr[CodedOutputStream], t: Type, getterTerm: Term): Expr[Unit] = {
     val getValue = getterTerm.seal
-    if t.isInt then Some('{ ${os}.writeInt32NoTag(${getValue.cast[Int]}) })
-    else if t.isLong then Some('{ ${os}.writeInt64NoTag(${getValue.cast[Long]}) })
-    else if t.isBoolean then Some('{ ${os}.writeBoolNoTag(${getValue.cast[Boolean]}) })
-    else if t.isDouble then Some('{ ${os}.writeDoubleNoTag(${getValue.cast[Double]}) })
-    else if t.isFloat then Some('{ ${os}.writeFloatNoTag(${getValue.cast[Float]}) })
-    else if t.isString then Some('{ ${os}.writeStringNoTag(${getValue.cast[String]}) })
-    else if t.isArrayByte then Some('{ ${os}.writeByteArrayNoTag(${getValue.cast[Array[Byte]]}) })
-    else if t.isArraySeqByte then Some('{ ${os}.writeByteArrayNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) })
-    else if t.isBytesType then Some('{ ${os}.writeByteArrayNoTag(${getValue.cast[Bytes]}.unsafeArray) })
-    else None
+    if t.isInt then '{ ${os}.writeInt32NoTag(${getValue.cast[Int]}) }
+    else if t.isLong then '{ ${os}.writeInt64NoTag(${getValue.cast[Long]}) }
+    else if t.isBoolean then '{ ${os}.writeBoolNoTag(${getValue.cast[Boolean]}) }
+    else if t.isDouble then '{ ${os}.writeDoubleNoTag(${getValue.cast[Double]}) }
+    else if t.isFloat then '{ ${os}.writeFloatNoTag(${getValue.cast[Float]}) }
+    else if t.isString then '{ ${os}.writeStringNoTag(${getValue.cast[String]}) }
+    else if t.isArrayByte then '{ ${os}.writeByteArrayNoTag(${getValue.cast[Array[Byte]]}) }
+    else if t.isArraySeqByte then '{ ${os}.writeByteArrayNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) }
+    else if t.isBytesType then '{ ${os}.writeByteArrayNoTag(${getValue.cast[Bytes]}.unsafeArray) }
+    else qctx.throwError(s"Unsupported common type: ${t.typeSymbol.name}")
   }
 
   private def size[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] =
