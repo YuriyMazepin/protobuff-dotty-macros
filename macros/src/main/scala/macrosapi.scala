@@ -56,10 +56,10 @@ private class Impl(using qctx: QuoteContext) {
     if (nums.groupBy(_._2).exists(_._2.size != 1)) qctx.throwError(s"nums ${nums} should be unique")
 
 
-    val codec = 
-      '{ new MessageCodec[A] {
-          def prepare(a: A): Prepare = ${ prepareImpl('a, fields) }
-          def read(is: CodedInputStream): A = ${ readImpl(t.unseal.tpe, fields, 'is).cast[A] }
+    val codec = '{ 
+      new MessageCodec[A] {
+        def prepare(a: A): Prepare = ${ prepareImpl('a, fields) }
+        def read(is: CodedInputStream): A = ${ readImpl(t.unseal.tpe, fields, 'is).cast[A] }
       }
     }
     // println(codec.show)
@@ -135,21 +135,6 @@ private class Impl(using qctx: QuoteContext) {
         , '{ ${getter}.foreach((v: ${pType}) => ${writeFun(os, tpe1, 'v.unseal)} ) }
         )
     else ??? //todo embedded messages
-    
-
-  private def writeFun(os: Expr[CodedOutputStream], t: Type, getterTerm: Term): Expr[Unit] = {
-    val getValue = getterTerm.seal
-    if t.isInt then '{ ${os}.writeInt32NoTag(${getValue.cast[Int]}) }
-    else if t.isLong then '{ ${os}.writeInt64NoTag(${getValue.cast[Long]}) }
-    else if t.isBoolean then '{ ${os}.writeBoolNoTag(${getValue.cast[Boolean]}) }
-    else if t.isDouble then '{ ${os}.writeDoubleNoTag(${getValue.cast[Double]}) }
-    else if t.isFloat then '{ ${os}.writeFloatNoTag(${getValue.cast[Float]}) }
-    else if t.isString then '{ ${os}.writeStringNoTag(${getValue.cast[String]}) }
-    else if t.isArrayByte then '{ ${os}.writeByteArrayNoTag(${getValue.cast[Array[Byte]]}) }
-    else if t.isArraySeqByte then '{ ${os}.writeByteArrayNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) }
-    else if t.isBytesType then '{ ${os}.writeByteArrayNoTag(${getValue.cast[Bytes]}.unsafeArray) }
-    else qctx.throwError(s"Unsupported common type: ${t.typeSymbol.name}")
-  }
 
   private def size[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] =
    if field.tpe.isCommonType then sizeCommon(a, field, sizeAcc)
@@ -203,19 +188,6 @@ private class Impl(using qctx: QuoteContext) {
         val incrementAcc = increment(sizeAcc, sum)
         List(sizeValDef, sizeExpr.unseal, incrementAcc)
     else ??? //todo embedded messages
-
-  private def sizeFun(t: Type, getterTerm: Term): Expr[Int] =
-    val getValue = getterTerm.seal
-    if t.isInt then '{ CodedOutputStream.computeInt32SizeNoTag(${getValue.cast[Int]}) }
-    else if t.isLong then '{ CodedOutputStream.computeInt64SizeNoTag(${getValue.cast[Long]}) }
-    else if t.isBoolean then Expr(1)
-    else if t.isDouble then Expr(8)
-    else if t.isFloat then Expr(4)
-    else if t.isString then '{ CodedOutputStream.computeStringSizeNoTag(${getValue.cast[String]}) }
-    else if t.isArrayByte then '{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Array[Byte]]}) }
-    else if t.isArraySeqByte then '{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) }
-    else if t.isBytesType then '{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Bytes]}.unsafeArray) }
-    else qctx.throwError(s"Unsupported common type: ${t.typeSymbol.name}")
 
   private def getterTerm[A: quoted.Type](a: Expr[A], field: FieldInfo): Term =
     Select(a.unseal, field.getter)
@@ -400,6 +372,32 @@ private class Impl(using qctx: QuoteContext) {
       case _ => qctx.throwError(s"It isn't Iterable type: ${t.typeSymbol.name}")
     def isCommonType: Boolean = commonTypes.exists(_ =:= t)
   }
+
+  private def writeFun(os: Expr[CodedOutputStream], t: Type, getterTerm: Term): Expr[Unit] =
+    val getValue = getterTerm.seal
+    if t.isInt then '{ ${os}.writeInt32NoTag(${getValue.cast[Int]}) }
+    else if t.isLong then '{ ${os}.writeInt64NoTag(${getValue.cast[Long]}) }
+    else if t.isBoolean then '{ ${os}.writeBoolNoTag(${getValue.cast[Boolean]}) }
+    else if t.isDouble then '{ ${os}.writeDoubleNoTag(${getValue.cast[Double]}) }
+    else if t.isFloat then '{ ${os}.writeFloatNoTag(${getValue.cast[Float]}) }
+    else if t.isString then '{ ${os}.writeStringNoTag(${getValue.cast[String]}) }
+    else if t.isArrayByte then '{ ${os}.writeByteArrayNoTag(${getValue.cast[Array[Byte]]}) }
+    else if t.isArraySeqByte then '{ ${os}.writeByteArrayNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) }
+    else if t.isBytesType then '{ ${os}.writeByteArrayNoTag(${getValue.cast[Bytes]}.unsafeArray) }
+    else qctx.throwError(s"Unsupported common type: ${t.typeSymbol.name}")
+
+  private def sizeFun(t: Type, getterTerm: Term): Expr[Int] =
+    val getValue = getterTerm.seal
+    if t.isInt then '{ CodedOutputStream.computeInt32SizeNoTag(${getValue.cast[Int]}) }
+    else if t.isLong then '{ CodedOutputStream.computeInt64SizeNoTag(${getValue.cast[Long]}) }
+    else if t.isBoolean then Expr(1)
+    else if t.isDouble then Expr(8)
+    else if t.isFloat then Expr(4)
+    else if t.isString then '{ CodedOutputStream.computeStringSizeNoTag(${getValue.cast[String]}) }
+    else if t.isArrayByte then '{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Array[Byte]]}) }
+    else if t.isArraySeqByte then '{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[ArraySeq[Byte]]}.toArray[Byte]) }
+    else if t.isBytesType then '{ CodedOutputStream.computeByteArraySizeNoTag(${getValue.cast[Bytes]}.unsafeArray) }
+    else qctx.throwError(s"Unsupported common type: ${t.typeSymbol.name}")
 
   private def readFun(t: Type, is: Expr[CodedInputStream]): Expr[Any] =
     if t.isInt then '{ ${is}.readInt32 }

@@ -35,11 +35,22 @@ object models {
   final case class ClassWithArraySeq(@N(1) y: ArraySeq[Byte])
   final case class ClassWithBytes(@N(1) z: Bytes)
 
+  final case class Collections(
+    @N(21) int: List[Int]
+  , @N(22) long: List[Long]
+  , @N(23) bool: List[Boolean]
+  , @N(24) double: List[Double]
+  , @N(25) float: List[Float]
+  , @N(26) str: List[String]
+  , @N(27) bytes: List[Array[Byte]]
+  )
+
   given MessageCodec[Basic] = casecodecAuto
   given MessageCodec[OptionBasic] = casecodecAuto
   given MessageCodec[ClassWithArray] = casecodecAuto
   given MessageCodec[ClassWithArraySeq] = casecodecAuto
   given MessageCodec[ClassWithBytes] = casecodecAuto
+  given MessageCodec[Collections] = casecodecAuto
 }
 
 class Testing {
@@ -118,5 +129,36 @@ class Testing {
     assert(decoded.float.get == data.float.get)
     assert(decoded.str.get == data.str.get)
     assert(Arrays.equals(decoded.bytes.get, data.bytes.get))
+  }
+
+  @Test def test6(): Unit = {
+    import java.util.Arrays
+
+    val int = List(Int.MinValue, -2, -1, 0, 1, 2, Int.MaxValue)
+    val long = List(Long.MinValue, -2L, -1L, 0L, 1L, 2L, Long.MaxValue)
+    val bool = List(false, true)
+    val double = List(Double.MinValue, -2.0D, -1.0D, 0.0D, 1.0D, 2.0D, Double.MaxValue)
+    val float = List(Float.MinValue, -2.0F, -1.0F, 0.0F, 1.0F, 2.0F, Float.MaxValue)
+    val str = List("", "str")
+    val bytes = List(Array.empty[Byte], Array(0.toByte), Array(1.toByte), Array(2.toByte), Array(255.toByte))
+
+    val data = Collections(
+        int = int
+      , long = long
+      , bool = bool
+      , double = double
+      , float = float
+      , str = str
+      , bytes = bytes
+    )
+    val encoded = encode(data)
+    val decoded = decode[Collections](encoded)
+    assert(decoded.int == data.int)
+    assert(decoded.long == data.long)
+    assert(decoded.bool == data.bool)
+    assert(decoded.double == data.double)
+    assert(decoded.float == data.float)
+    assert(decoded.str == data.str)
+    val _ = assert(decoded.bytes.zip(data.bytes).forall{ case (decodedBytes, dataBytes) => Arrays.equals(decodedBytes, dataBytes) })
   }
 }
