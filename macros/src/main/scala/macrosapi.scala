@@ -21,7 +21,16 @@ private class Impl(using qctx: QuoteContext) {
   import qctx.tasty.{_, given _}
   import qctx.tasty.defn._
 
-  private[this] case class FieldInfo(name: String, num: Int, tpe: Type, tpt: TypeTree, getter: Symbol, sizeSym: Symbol, prepareSym: Symbol)
+  private[this] case class FieldInfo(
+    name: String
+  , num: Int
+  , tpe: Type
+  , tpt: TypeTree
+  , getter: Symbol
+  , sizeSym: Symbol
+  , prepareSym: Symbol
+  , prepareOptionSym: Symbol
+  )
 
   def caseCodecAuto[A: quoted.Type]: Expr[MessageCodec[A]] = {
     val ctx = summon[Context]
@@ -50,12 +59,12 @@ private class Impl(using qctx: QuoteContext) {
       , getter = aTypeSymbol.field(name)
       , sizeSym = Symbol.newVal(ctx.owner, s"${name}Size", IntType, Flags.Mutable, Symbol.noSymbol)
       , prepareSym = Symbol.newVal(ctx.owner, s"${name}Prepare", PrepareType, Flags.Mutable, Symbol.noSymbol)
+      , prepareOptionSym = Symbol.newVal(ctx.owner, s"${name}Prepare", appliedOptionType(PrepareType), Flags.Mutable, Symbol.noSymbol)
       )
     }
     if (nums.exists(_._2 < 1)) qctx.throwError(s"nums ${nums} should be > 0")
     if (nums.size != fields.size) qctx.throwError(s"nums size ${nums} not equal to `${aType}` constructor params size ${fields.size}")
     if (nums.groupBy(_._2).exists(_._2.size != 1)) qctx.throwError(s"nums ${nums} should be unique")
-
 
     val codec = '{ 
       new MessageCodec[A] {
@@ -63,7 +72,7 @@ private class Impl(using qctx: QuoteContext) {
         def read(is: CodedInputStream): A = ${ readImpl(t.unseal.tpe, fields, 'is).cast[A] }
       }
     }
-    // println(codec.show)
+    println(codec.show)
     codec
   }
 
@@ -104,16 +113,26 @@ private class Impl(using qctx: QuoteContext) {
     val getter = getterTerm(a, field)
     val getterOption = getterOptionTerm(a, field)
     if tpe.isCommonType then
-      val fun = writeFun(os, tpe, getterOption)
-      val isDefined = Select(getter, OptionClass.method("isDefined").head).seal.cast[Boolean]
-      val expr = '{
-        if ${isDefined} then {
-          ${os}.writeUInt32NoTag(${Expr(fieldTag(field))})
-          ${fun}
+      List(
+        '{
+          if ${getter.seal.cast[Option[Any]]}.isDefined then {
+            ${os}.writeUInt32NoTag(${Expr(fieldTag(field))})
+            ${writeFun(os, tpe, getterOption)}
+          }
         }
-      }
-      List(expr)
-    else ??? //todo embedded messages
+      )
+    else
+      val prepareOptionRef = Ref(field.prepareOptionSym).seal.cast[Option[Prepare]]
+      List(
+        '{
+          if ${prepareOptionRef}.isDefined then {
+            val p = ${prepareOptionRef}.get
+            ${os}.writeUInt32NoTag(${Expr(fieldTag(field))})
+            ${os}.writeUInt32NoTag(p.size)
+            p.write(${os})
+          }
+        }
+      )
 
   private def writeCollection[A: quoted.Type](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): List[Expr[Unit]] =
     val tpe1 = field.tpe.iterableArgument
@@ -166,7 +185,22 @@ private class Impl(using qctx: QuoteContext) {
       val incrementSize = increment(sizeAcc, sum)
       val isDefined = Select(getter, OptionClass.method("isDefined").head)
       List(If(isDefined, incrementSize, unitLiteral))
-    else ??? //todo embedded messages
+    else
+      val prepareOptionRhs = '{
+        if (${getter.seal.cast[Option[Any]]}.isDefined) {
+          val p: Prepare = ${findCodec(tpe)}.prepare(${getterOption.seal})
+          ${
+            increment(
+              sizeAcc
+            , '{CodedOutputStream.computeTagSize(${Expr(field.num)}) + CodedOutputStream.computeUInt32SizeNoTag(p.size) + p.size }
+            ).seal
+          }
+          Some(p)
+        } else None
+      }
+      List(
+        ValDef(field.prepareOptionSym, Some(prepareOptionRhs.unseal))
+      )
 
   private def sizeCollection[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] = 
     val tpe1 = field.tpe.iterableArgument
@@ -266,7 +300,10 @@ private class Impl(using qctx: QuoteContext) {
       val fun = readFun(p.tpe.optionArgument, is)
       Assign(readRef, '{Some(${fun})}.unseal).seal
     else if p.tpe.isOption then
-      ??? //todo embedded messages
+      putLimit(
+        is
+      , Assign(readRef, '{Some(${findCodec(p.tpe.optionArgument)}.read(${is}))}.unseal).seal 
+      )
     else if p.tpe.isIterable && p.tpe.iterableArgument.isCommonType then
       val tpe1 = p.tpe.iterableArgument
       val fun = readFun(tpe1, is)
@@ -345,7 +382,7 @@ private class Impl(using qctx: QuoteContext) {
     val msgCodecTpe = '[MessageCodec[$tpe]]
     summonExpr(using msgCodecTpe) match
       case Some(expr) => expr
-      case None => qctx.throwError(s"could not find implicit codec for ${tpe.show}")
+      case None => qctx.throwError(s"could not find implicit codec for `${tpe.show}`")
 
   private def classApply(t: Type, params: List[Term]): Term =
     t match
@@ -376,6 +413,10 @@ private class Impl(using qctx: QuoteContext) {
   private def appliedBuilderType(t1: Type, t2: Type): Type = builderType match
     case AppliedType(tycon,_) => AppliedType(tycon, List(t1, t2))
     case _ => ???
+  private def optionType: Type = typeOf[Option[Any]]
+
+  private def appliedOptionType(t: Type): Type = optionType match
+    case AppliedType(tycon,_) => AppliedType(tycon, List(t))
 
   private val commonTypes: List[Type] =
     StringType :: IntType :: LongType :: BooleanType :: DoubleType :: FloatType :: ArrayByteType :: ArraySeqByteType :: BytesType :: Nil 
