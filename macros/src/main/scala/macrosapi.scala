@@ -21,7 +21,7 @@ private class Impl(using qctx: QuoteContext) {
   import qctx.tasty.{_, given _}
   import qctx.tasty.defn._
 
-  private[this] case class FieldInfo(name: String, num: Int, tpe: Type, tpt: TypeTree, getter: Symbol, sizeSym: Symbol)
+  private[this] case class FieldInfo(name: String, num: Int, tpe: Type, tpt: TypeTree, getter: Symbol, sizeSym: Symbol, prepareSym: Symbol)
 
   def caseCodecAuto[A: quoted.Type]: Expr[MessageCodec[A]] = {
     val ctx = summon[Context]
@@ -49,6 +49,7 @@ private class Impl(using qctx: QuoteContext) {
       , tpt = tpt
       , getter = aTypeSymbol.field(name)
       , sizeSym = Symbol.newVal(ctx.owner, s"${name}Size", IntType, Flags.Mutable, Symbol.noSymbol)
+      , prepareSym = Symbol.newVal(ctx.owner, s"${name}Prepare", PrepareType, Flags.Mutable, Symbol.noSymbol)
       )
     }
     if (nums.exists(_._2 < 1)) qctx.throwError(s"nums ${nums} should be > 0")
@@ -88,7 +89,7 @@ private class Impl(using qctx: QuoteContext) {
         if p.tpe.isCommonType then writeCommon(a, os, p)
         else if p.tpe.isOption then writeOption(a, os, p)
         else if p.tpe.isIterable then writeCollection(a, os, p)
-        else ??? //todo embedded messages
+        else writeMessage(a, os, p)
       )
     , Expr.unitExpr)
 
@@ -136,11 +137,19 @@ private class Impl(using qctx: QuoteContext) {
         )
     else ??? //todo embedded messages
 
+  private def writeMessage[A: quoted.Type](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): List[Expr[Unit]] =
+    val prepareRef = Ref(field.prepareSym).seal.cast[Prepare]
+    List(
+      '{ ${os}.writeUInt32NoTag(${Expr(fieldTag(field))}) }
+    , '{ ${os}.writeUInt32NoTag(${prepareRef}.size) }
+    , '{ ${prepareRef}.write(${os}) }
+    )
+
   private def size[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] =
    if field.tpe.isCommonType then sizeCommon(a, field, sizeAcc)
    else if field.tpe.isOption then sizeOption(a, field, sizeAcc)
    else if field.tpe.isIterable then sizeCollection(a, field, sizeAcc)
-   else ???
+   else sizeMessage(a, field, sizeAcc)
 
   private def sizeCommon[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] =
     val fun = sizeFun(field.tpe, getterTerm(a, field))
@@ -188,6 +197,19 @@ private class Impl(using qctx: QuoteContext) {
         val incrementAcc = increment(sizeAcc, sum)
         List(sizeValDef, sizeExpr.unseal, incrementAcc)
     else ??? //todo embedded messages
+
+  private def sizeMessage[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] =
+    val getter = getterTerm(a, field).seal
+    val prepare = '{ ${findCodec(field.tpe)}.prepare(${getter}) }
+    val prepareValDef = ValDef(field.prepareSym, Some(prepare.unseal))
+    val prepareRef = Ref(field.prepareSym).seal.cast[Prepare]
+    val sum = '{ 
+      CodedOutputStream.computeTagSize(${Expr(field.num)}) + 
+      CodedOutputStream.computeUInt32SizeNoTag(${prepareRef}.size) +
+      ${prepareRef}.size
+    }
+    val incrementAcc = increment(sizeAcc, sum)
+    List(prepareValDef, incrementAcc)
 
   private def getterTerm[A: quoted.Type](a: Expr[A], field: FieldInfo): Term =
     Select(a.unseal, field.getter)
@@ -261,9 +283,13 @@ private class Impl(using qctx: QuoteContext) {
         )
     else if p.tpe.isIterable then
       ??? //todo embedded messages
-    else ??? //todo embedded messages
+    else
+      putLimit(
+        is
+      , Assign(readRef, '{Some(${findCodec(p.tpe)}.read(${is}))}.unseal).seal 
+      )
 
-  private def putLimit(is: Expr[CodedInputStream], read: Expr[Unit]): Expr[Unit] =
+  private def putLimit(is: Expr[CodedInputStream], read: Expr[Any]): Expr[Unit] =
     '{
       val readSize: Int = ${is}.readRawVarint32
       val limit = ${is}.pushLimit(readSize)
@@ -314,6 +340,13 @@ private class Impl(using qctx: QuoteContext) {
       , List(exeption)
       )
 
+  private def findCodec(t: Type): Expr[MessageCodec[Any]] = 
+    val tpe = t.seal.asInstanceOf[quoted.Type[Any]]
+    val msgCodecTpe = '[MessageCodec[$tpe]]
+    summonExpr(using msgCodecTpe) match
+      case Some(expr) => expr
+      case None => qctx.throwError(s"could not find implicit codec for ${tpe.show}")
+
   private def classApply(t: Type, params: List[Term]): Term =
     t match
       case y: TermRef => Ident(y)
@@ -327,13 +360,16 @@ private class Impl(using qctx: QuoteContext) {
   private val BytesType: Type = typeOf[Bytes]
   private val NTpe: Type = typeOf[N]
   private val ItetableType: Type = typeOf[scala.collection.Iterable[Any]]
-  // private val MessageCodecType: Type = typeOf[MessageCodec[Any]]
+  private val MessageCodecType: Type = typeOf[MessageCodec[Any]]
+  private val PrepareType: Type = typeOf[Prepare]
   private val CodedInputStreamType: Type = typeOf[CodedInputStream]
   private def (t: Type) isNType: Boolean = t =:= NTpe
   private def (t: Type) isCaseClass: Boolean = t.typeSymbol.flags.is(Flags.Case)
   private def (t: Type) isSealedTrait: Boolean = t.typeSymbol.flags.is(Flags.Sealed & Flags.Trait)
   private def (t: Type) isIterable: Boolean = t <:< ItetableType && !t.isArraySeqByte
-  // private def messageCodecFor(t: Type): Type = AppliedType(MessageCodecType, List(t))
+  private def messageCodecFor(t: Type): Type = MessageCodecType match
+    case AppliedType(tycon,_) => AppliedType(tycon, List(t))
+    case _ => ???
   private def unitLiteral: Literal = Literal(Constant(()))
 
   private def builderType: Type = typeOf[scala.collection.mutable.Builder[Unit, Unit]]
