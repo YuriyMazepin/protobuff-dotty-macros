@@ -43,13 +43,19 @@ object models {
   , @N(25) float: List[Float]
   , @N(26) str: List[String]
   , @N(27) bytes: List[Array[Byte]]
+  , @N(28) message: List[Message]
   )
+
+  final case class Message(@N(2) int: Int, @N(4) str: String, @N(6) set: Set[String], @N(8) msg1: Option[Message1])
+  final case class Message1(@N(1) name: String, @N(2) value: Double)
 
   given MessageCodec[Basic] = casecodecAuto
   given MessageCodec[OptionBasic] = casecodecAuto
   given MessageCodec[ClassWithArray] = casecodecAuto
   given MessageCodec[ClassWithArraySeq] = casecodecAuto
   given MessageCodec[ClassWithBytes] = casecodecAuto
+  given MessageCodec[Message1] = casecodecAuto
+  given MessageCodec[Message] = casecodecAuto
   given MessageCodec[Collections] = casecodecAuto
 }
 
@@ -141,6 +147,10 @@ class Testing {
     val float = List(Float.MinValue, -2.0F, -1.0F, 0.0F, 1.0F, 2.0F, Float.MaxValue)
     val str = List("", "str")
     val bytes = List(Array.empty[Byte], Array(0.toByte), Array(1.toByte), Array(2.toByte), Array(255.toByte))
+    val message = List(
+        Message(0, "0", Set("1", "2", "3"), Some(Message1("msg1", 3.0)))
+      , Message(1, "2", Set("4", "5", "6"), None)
+      )
 
     val data = Collections(
         int = int
@@ -150,8 +160,9 @@ class Testing {
       , float = float
       , str = str
       , bytes = bytes
+      , message = message
     )
-    val encoded = encode(data)
+    val encoded = encode[Collections](data)
     val decoded = decode[Collections](encoded)
     assert(decoded.int == data.int)
     assert(decoded.long == data.long)
@@ -159,6 +170,7 @@ class Testing {
     assert(decoded.double == data.double)
     assert(decoded.float == data.float)
     assert(decoded.str == data.str)
+    assert(decoded.message == data.message)
     val _ = assert(decoded.bytes.zip(data.bytes).forall{ case (decodedBytes, dataBytes) => Arrays.equals(decodedBytes, dataBytes) })
   }
 }

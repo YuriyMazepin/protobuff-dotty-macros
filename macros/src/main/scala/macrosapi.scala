@@ -74,7 +74,7 @@ private class Impl(using qctx: QuoteContext) {
         def read(is: CodedInputStream): A = ${ readImpl(t.unseal.tpe, fields, 'is).cast[A] }
       }
     }
-    println(codec.show)
+    // println(codec.show)
     codec
   }
 
@@ -445,16 +445,12 @@ private class Impl(using qctx: QuoteContext) {
   private val BytesType: Type = typeOf[Bytes]
   private val NTpe: Type = typeOf[N]
   private val ItetableType: Type = typeOf[scala.collection.Iterable[Any]]
-  private val MessageCodecType: Type = typeOf[MessageCodec[Any]]
   private val PrepareType: Type = typeOf[Prepare]
   private val CodedInputStreamType: Type = typeOf[CodedInputStream]
   private def (t: Type) isNType: Boolean = t =:= NTpe
   private def (t: Type) isCaseClass: Boolean = t.typeSymbol.flags.is(Flags.Case)
   private def (t: Type) isSealedTrait: Boolean = t.typeSymbol.flags.is(Flags.Sealed & Flags.Trait)
   private def (t: Type) isIterable: Boolean = t <:< ItetableType && !t.isArraySeqByte
-  private def messageCodecFor(t: Type): Type = MessageCodecType match
-    case AppliedType(tycon,_) => AppliedType(tycon, List(t))
-    case _ => ???
   private def unitLiteral: Literal = Literal(Constant(()))
 
   private def builderType: Type = typeOf[scala.collection.mutable.Builder[Unit, Unit]]
