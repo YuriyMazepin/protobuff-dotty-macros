@@ -14,7 +14,7 @@ trait Common {
   import qctx.tasty.{_, given _}
   import qctx.tasty.defn._
 
-  case class FieldInfo(
+  private[proto] case class FieldInfo(
     name: String
   , num: Int
   , tpe: Type
@@ -29,7 +29,7 @@ trait Common {
   def (field: FieldInfo) tag: Int = field.num << 3 | wireType(field.tpe)
 
   def wireType(t: Type): Int =
-    if t.isInt || t.isLong || t.isBoolean then 0
+    if      t.isInt || t.isLong || t.isBoolean then 0
     else if t.isDouble then 1
     else if t.isFloat then 5
     else if t.isOption then wireType(t.optionArgument)
@@ -44,7 +44,7 @@ trait Common {
 
   def writeFun(os: Expr[CodedOutputStream], t: Type, getterTerm: Term): Expr[Unit] =
     val getValue = getterTerm.seal
-    if t.isInt then '{ ${os}.writeInt32NoTag(${getValue.cast[Int]}) }
+    if      t.isInt then '{ ${os}.writeInt32NoTag(${getValue.cast[Int]}) }
     else if t.isLong then '{ ${os}.writeInt64NoTag(${getValue.cast[Long]}) }
     else if t.isBoolean then '{ ${os}.writeBoolNoTag(${getValue.cast[Boolean]}) }
     else if t.isDouble then '{ ${os}.writeDoubleNoTag(${getValue.cast[Double]}) }
@@ -57,7 +57,7 @@ trait Common {
 
   def sizeFun(t: Type, getterTerm: Term): Expr[Int] =
     val getValue = getterTerm.seal
-    if t.isInt then '{ CodedOutputStream.computeInt32SizeNoTag(${getValue.cast[Int]}) }
+    if      t.isInt then '{ CodedOutputStream.computeInt32SizeNoTag(${getValue.cast[Int]}) }
     else if t.isLong then '{ CodedOutputStream.computeInt64SizeNoTag(${getValue.cast[Long]}) }
     else if t.isBoolean then Expr(1)
     else if t.isDouble then Expr(8)
@@ -69,7 +69,7 @@ trait Common {
     else qctx.throwError(s"Unsupported common type: ${t.typeSymbol.name}")
 
   def readFun(t: Type, is: Expr[CodedInputStream]): Expr[Any] =
-    if t.isInt then '{ ${is}.readInt32 }
+    if      t.isInt then '{ ${is}.readInt32 }
     else if t.isLong then '{ ${is}.readInt64 }
     else if t.isBoolean then '{ ${is}.readBool }
     else if t.isDouble then '{ ${is}.readDouble }
