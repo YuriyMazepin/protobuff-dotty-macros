@@ -30,6 +30,7 @@ private class Impl(using qctx: QuoteContext) {
   , sizeSym: Symbol
   , prepareSym: Symbol
   , prepareOptionSym: Symbol
+  , prepareArraySym: Symbol
   )
 
   def caseCodecAuto[A: quoted.Type]: Expr[MessageCodec[A]] = {
@@ -60,6 +61,7 @@ private class Impl(using qctx: QuoteContext) {
       , sizeSym = Symbol.newVal(ctx.owner, s"${name}Size", IntType, Flags.Mutable, Symbol.noSymbol)
       , prepareSym = Symbol.newVal(ctx.owner, s"${name}Prepare", PrepareType, Flags.Mutable, Symbol.noSymbol)
       , prepareOptionSym = Symbol.newVal(ctx.owner, s"${name}Prepare", appliedOptionType(PrepareType), Flags.Mutable, Symbol.noSymbol)
+      , prepareArraySym = Symbol.newVal(ctx.owner, s"${name}Prepare", typeOf[Array[Prepare]], Flags.Mutable, Symbol.noSymbol)
       )
     }
     if (nums.exists(_._2 < 1)) qctx.throwError(s"nums ${nums} should be > 0")
@@ -154,7 +156,22 @@ private class Impl(using qctx: QuoteContext) {
         , '{ ${os}.writeUInt32NoTag(${sizeRef.seal.cast[Int]}) }
         , '{ ${getter}.foreach((v: ${pType}) => ${writeFun(os, tpe1, 'v.unseal)} ) }
         )
-    else ??? //todo embedded messages
+    else
+      val prepareArrayRef = Ref(field.prepareArraySym).seal.cast[Array[Prepare]]
+      val counterName = s"${field.name}Counter"
+      List(
+        '{
+          @showName(${Expr(counterName)})
+          var counter = 0
+          while (counter < ${prepareArrayRef}.length) {
+            val p = ${prepareArrayRef}(counter)
+            ${os}.writeUInt32NoTag(${Expr(fieldTag(field))})
+            ${os}.writeUInt32NoTag(p.size)
+            p.write(${os}) 
+            counter = counter + 1
+          }
+        }
+      )
 
   private def writeMessage[A: quoted.Type](a: Expr[A], os: Expr[CodedOutputStream], field: FieldInfo): List[Expr[Unit]] =
     val prepareRef = Ref(field.prepareSym).seal.cast[Prepare]
@@ -206,9 +223,9 @@ private class Impl(using qctx: QuoteContext) {
     val tpe1 = field.tpe.iterableArgument
     val getter = getterTerm(a, field).seal.cast[Iterable[Any]]
     val pType = tpe1.seal.asInstanceOf[quoted.Type[Any]]
-    val sizeRef = Ref(field.sizeSym)
-    val sizeValDef = ValDef(field.sizeSym, Some(Literal(Constant(0))))
     if tpe1.isCommonType then
+      val sizeRef = Ref(field.sizeSym)
+      val sizeValDef = ValDef(field.sizeSym, Some(Literal(Constant(0))))
       if tpe1.isString || tpe1.isArrayByte || tpe1.isArraySeqByte || tpe1.isBytesType then
         val tagSizeName = s"${field.name}TagSize"
         val sizeExpr = '{ 
@@ -230,7 +247,29 @@ private class Impl(using qctx: QuoteContext) {
         }
         val incrementAcc = increment(sizeAcc, sum)
         List(sizeValDef, sizeExpr.unseal, incrementAcc)
-    else ??? //todo embedded messages
+    else
+      val prepareArrayRef = Ref(field.prepareArraySym)
+      val prepareArrayRhs = '{ new Array[Prepare](${getter}.size) }
+      val counterName = s"${field.name}Counter"
+      val sizeExpr = '{
+        @showName(${Expr(counterName)})
+        var counter = 0
+        ${getter}.foreach((v: ${pType}) => {
+          val p: Prepare = ${findCodec(tpe1)}.prepare(v)
+          ${prepareArrayRef.seal.cast[Array[Prepare]]}(counter) = p
+          ${
+            increment(
+              sizeAcc
+            , '{CodedOutputStream.computeTagSize(${Expr(field.num)}) + CodedOutputStream.computeUInt32SizeNoTag(p.size) + p.size }
+            ).seal
+          }
+          counter = counter + 1
+        })
+      }
+      List(
+        ValDef(field.prepareArraySym, Some(prepareArrayRhs.unseal))
+      , sizeExpr.unseal
+      )
 
   private def sizeMessage[A: quoted.Type](a: Expr[A], field: FieldInfo, sizeAcc: Ref): List[Statement] =
     val getter = getterTerm(a, field).seal
@@ -319,7 +358,16 @@ private class Impl(using qctx: QuoteContext) {
         , '{ while (${is}.getBytesUntilLimit > 0) ${addOneApply} }
         )
     else if p.tpe.isIterable then
-      ??? //todo embedded messages
+      val tpe1 = p.tpe.iterableArgument
+      val fun = '{ ${findCodec(tpe1)}.read(${is}) }
+      val addOneApply = Apply(
+        Select(readRef, readRef.tpe.termSymbol.method("addOne").head)
+      , List(fun.unseal)
+      ).seal
+      putLimit(
+        is
+      , addOneApply
+      )
     else
       putLimit(
         is

@@ -11,7 +11,16 @@ object Main {
 
   def main(args: Array[String]): Unit = {
     given codec2 as MessageCodec[Animal] = casecodecAuto[Animal]
-    val a = Animal(name="Jerry", old=3, long=555, optionStr = Some("hello"), list = List("a", "b", "c"), intList = List(1, 3, 5, 100), test=Test("v1", 333), test2=Some(Test("v2", 444)))
+    val a = Animal(
+      name="Jerry"
+    , old=3
+    , long=555
+    , optionStr = Some("hello")
+    , list = List("a", "b", "c")
+    , intList = List(1, 3, 5, 100)
+    , test = Test("v1", 333)
+    , test2 = Some(Test("v2", 444))
+    , testList = List(Test("v1", 111), Test("v2", 222)))
     val bytes = encode(a)
     println(bytes.mkString(","))
     val res: Animal = decode(bytes)
@@ -28,6 +37,7 @@ final case class Animal(
 , @N(55) intList: List[Int]
 , @N(100) test: Test
 , @N(101) test2: Option[Test]
+, @N(102) testList: List[Test]
 )
 
 final case class Test(@N(1) value1: String, @N(2) value2: Int)
